@@ -57,6 +57,13 @@ are in `tests/easy/test_core_upstream.py` unless noted.
 Not changed although known to be broken: `valdo/temp.py` has a syntax error upstream. Nothing
 imports it, so it is left as it is.
 
+Not changed on purpose, because changing them would change results: `blobs.preprocess` rounds
+the blur radius and then the Gaussian sigma down to whole grid points (`int(5 A / spacing)`,
+then `int(radius / 3)`). The blur width therefore jumps between about 0.8 and 1.7 A as the
+resolution changes, and there is no blur at all on grids coarser than 5/3 A (data worse than
+about 5 A at the default `sample_rate` 3). `score` is the sum of the blurred |difference| over
+the blob, so it grows with blob size; see "Known limitations" in USER_GUIDE.md.
+
 ### Version scheme
 
 `0.0.6+easy.1` is a PEP 440 *local version*: upstream base 0.0.6 plus valdo-easy release 1.

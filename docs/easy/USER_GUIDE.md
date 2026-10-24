@@ -199,6 +199,13 @@ Known limitations:
   ligand (or any change) present in many datasets, such as a common buffer molecule or a
   fragment that binds in a large fraction of the screen, becomes "typical" and its blobs get
   weaker. VALDO is best at finding changes that are rare across the screen.
+- **Ranking by `score` favours large blobs.** `score` adds up the blurred |difference| over the
+  whole blob, so a large blob outranks a smaller one of the same height, and a small ligand can
+  rank lower than its peak suggests. `blobs.csv` also has `peakz` to sort by. On the full PTP1B
+  screen the two rankings did about equally well (AUC 0.968 by `score`, 0.976 by `peakz`, over
+  13,974 blobs, 129 of them on known ligands). `score` put more known ligands in the global
+  top 100 (65 against 50 of 110 datasets); `peakz` made the ligand the dataset's top blob
+  slightly more often (105 against 103).
 - **Few datasets.** The VAE needs many datasets to learn the unbound crystal; below about 100
   usable datasets `valdo check` warns that rankings are less reliable.
 - **Twinning.** Twinned datasets correlate worse with the reference, may be reindexed

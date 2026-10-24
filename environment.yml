@@ -1,0 +1,27 @@
+# Conda environment for valdo-easy 0.0.6+easy.1.
+# These exact versions were validated on UCSF Wynton (Rocky Linux 8, CPU nodes) on 2026-10-24.
+#
+#   conda env create -f environment.yml
+#   conda activate valdo
+#   pip install -e .            # from the repository root: installs the 'valdo' command
+#
+# gemmi must stay at 0.6.7 or older (newer versions renamed functions VALDO uses).
+# The torch wheel from PyPI includes CUDA support on Linux and also runs on CPU-only machines.
+name: valdo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - torch==2.5.1
+      - numpy==2.4.6
+      - pandas==2.2.3
+      - scipy==1.17.1
+      - gemmi==0.6.7
+      - reciprocalspaceship==1.0.3
+      - scikit-learn==1.9.1
+      - matplotlib==3.11.2
+      - tqdm==4.70.1
+      - pyyaml==6.0.3
+      - pytest==9.1.1

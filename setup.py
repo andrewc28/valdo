@@ -33,8 +33,10 @@ setup(name="rs-valdo",
         "pyyaml",
         "matplotlib"
     ],
+    extras_require={"dev": ["pytest"]},
     entry_points={
         "console_scripts": [
+            "valdo=valdo.easy.cli:main",
             "valdo.refine=valdo.commandline.refine:main",
             "valdo.occupancy=valdo.commandline.occupancy:main",
             "valdo.pipeline=valdo.commandline.pipeline:main"

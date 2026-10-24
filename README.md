@@ -1,3 +1,12 @@
+> **New here? Start with [docs/easy/QUICKSTART.md](docs/easy/QUICKSTART.md).**
+> This is **valdo-easy** (`0.0.6+easy.1`), the lab's accessible version of VALDO: one command
+> (`valdo init` -> `valdo check` -> `valdo run` -> `valdo report`), one commented project file,
+> resumable runs and a report with ranked hits and maps. Guides:
+> [user guide](docs/easy/USER_GUIDE.md), [settings](docs/easy/CONFIG_REFERENCE.md),
+> [troubleshooting](docs/easy/TROUBLESHOOTING.md), [UCSF Wynton](docs/easy/WYNTON.md),
+> [changes from upstream](docs/easy/CHANGES_FROM_UPSTREAM.md); AI agents: [AGENTS.md](AGENTS.md).
+> Everything below is the upstream VALDO README (commit `1ec32c6`), unchanged.
+
 # *V*ae *A*ssisted *L*igand *D*isc*O*very (VALDO)
 
 [![PyPI](https://img.shields.io/pypi/v/rs-valdo?color=blue)](https://pypi.org/project/rs-valdo/)

@@ -48,7 +48,7 @@ def main():
             subprocess.run(["phenix.refine", 
                             pdbfile, 
                             mtzfile, 
-                            f"output.prefix={output_prefix})",
+                            f"output.prefix={output_prefix}",
                             f"{args.eff}", "--overwrite"])
     else:
         print("Only one PDB file is provided, will be used for all refinement initialization!", flush=True)

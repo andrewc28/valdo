@@ -77,7 +77,12 @@ def standardize_single_mtzs(filename, additional_args):
         new_filename = id + ".mtz"
         
         # Construct the full source and destination paths
-        tmp_source_path = os.path.join(source_path, filename)
+        # valdo-easy: filename usually comes from glob() and already contains
+        # source_path; joining it again doubled relative paths (file skipped).
+        if os.path.dirname(filename):
+            tmp_source_path = filename
+        else:
+            tmp_source_path = os.path.join(source_path, filename)
         tmp_destination_path = os.path.join(destination_path, new_filename)
         
         # We drop nan values here to avoid issues with downstream processing
@@ -107,7 +112,8 @@ def standardize_input_mtzs(source_path, destination_path, mtz_file_pattern, expc
     """
 
     # Get a list of all files in the source folder
-    file_list = glob.glob(source_path + "*.mtz")
+    # valdo-easy: os.path.join, so source_path works with or without a trailing "/"
+    file_list = glob.glob(os.path.join(source_path, "*.mtz"))
     print("Copying & renaming " + str(len(file_list)) + " MTZ files from " + source_path + " to " + destination_path)
 
     additional_args=[source_path, destination_path, mtz_file_pattern, expcolumns]
@@ -165,7 +171,7 @@ def add_phases(file_list, apo_mtzs_path, vae_reconstructed_with_phases_path,
             try:    
                 current[phase_2FOFC_col_out] = phases_df[phase_2FOFC_col_in]
                 current[phase_FOFC_col_out]  = phases_df[phase_FOFC_col_in]
-                current.write_mtz(vae_reconstructed_with_phases_path + os.path.basename(file))
+                current.write_mtz(os.path.join(vae_reconstructed_with_phases_path, os.path.basename(file)))
                 success=True
             except Exception as e:
                 print(e,flush=True)
@@ -340,7 +346,7 @@ def add_phases_from_pool_map(file, additional_args):
         try:    
             current[phase_2FOFC_col_out] = phases_df[phase_2FOFC_col_in]
             current[phase_FOFC_col_out]  = phases_df[phase_FOFC_col_in]
-            current.write_mtz(vae_reconstructed_with_phases_path + os.path.basename(file))
+            current.write_mtz(os.path.join(vae_reconstructed_with_phases_path, os.path.basename(file)))
             success=True
         except Exception as e:
             print(e,flush=True)

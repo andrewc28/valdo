@@ -1,2 +1,3 @@
 include license
 include valdo/VERSION
+include valdo/commandline/refine_drug.eff

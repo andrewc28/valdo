@@ -222,7 +222,8 @@ def run_filter(cfg):
         return
 
     # --- Load refinement summary ---
-    df = pd.read_csv(cfg["refine_summary"])
+    # valdo-easy: read IDs as text, so zero-padded IDs wider than 4 digits survive
+    df = pd.read_csv(cfg["refine_summary"], dtype={"file_idx": str, "symop": str})
     df["file_idx"] = df["file_idx"].astype(str).str.zfill(4)
     df["symop"]    = df["symop"].astype(str)
 
@@ -249,6 +250,9 @@ def run_filter(cfg):
     drop2 = set((bad_R["file_idx"] + "_" + bad_R["symop"] + ".mtz").tolist())
     print(f"Dropping {len(drop2)} datasets with Rf_final > {cfg['max_rfree']}")
     drop |= drop2
+    # valdo-easy: if reindex was skipped the scaled files are "{file_idx}.mtz" (no symop
+    # suffix) and the rule above matched nothing, so the R-free cut silently did nothing.
+    drop |= set((bad_R["file_idx"] + ".mtz").tolist())
 
     # --- Collect scaled files ---
     all_scaled = sorted(glob.glob(os.path.join(cfg["scaled_dir"], "*.mtz")))
@@ -887,3 +891,9 @@ def main():
     cfg = validate_config(args.stage, cfg)
     cfg["_force"] = args.force
     STAGE_REGISTRY[args.stage](cfg)
+
+
+# valdo-easy: without this, `python -m valdo.commandline.pipeline ...` imported the module and
+# exited 0 without doing anything (only the `valdo.pipeline` console script called main()).
+if __name__ == "__main__":
+    main()

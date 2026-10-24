@@ -1,6 +1,7 @@
 """
 Scaling structural factor magnitudes to a reference dataset, with anisotropic scaling parameters
 """
+import os
 import numpy as np
 import reciprocalspaceship as rs
 import pandas as pd
@@ -189,7 +190,7 @@ class Scaler(object):
             temp_mtz[self.columns[1]+'-scaled'] = rs.DataSeries(self.scaleit(SIGFB_complete, ln_k, uaniso, hkl_complete), dtype="Stddev")
             temp_mtz = temp_mtz.set_index(['H', 'K', 'L'])
             # Save the scaled mtz file
-            temp_mtz.write_mtz(outputmtz_path+concrete_filename+".mtz")
+            temp_mtz.write_mtz(os.path.join(outputmtz_path, concrete_filename + ".mtz"))
 
             str_ = f"Time: {time.time()-start_time:.3f}"
             if verbose:
@@ -202,8 +203,8 @@ class Scaler(object):
         
         metrics_df = pd.DataFrame(metrics)
         metrics_df.columns=['file', 'start_LS', 'start_corr', 'end_LS', 'end_corr']
-        metrics_df.to_pickle(outputmtz_path + prefix + 'scaling_metrics.pkl')
-        print("Scaling metrics have been saved at:", outputmtz_path + prefix + 'scaling_metrics.pkl', flush=True)
+        metrics_df.to_pickle(os.path.join(outputmtz_path, prefix + 'scaling_metrics.pkl'))
+        print("Scaling metrics have been saved at:", os.path.join(outputmtz_path, prefix + 'scaling_metrics.pkl'), flush=True)
         return metrics
 
 # Multiprocessing variant #
@@ -301,7 +302,7 @@ class Scaler_pool(object):
         temp_mtz[self.columns[1]+'-scaled'] = rs.DataSeries(self.scaleit(SIGFB_complete, ln_k, uaniso, hkl_complete), dtype="Stddev")
         temp_mtz = temp_mtz.set_index(['H', 'K', 'L'])
         # Save the scaled mtz file
-        temp_mtz.write_mtz(outputmtz_path+concrete_filename+".mtz")
+        temp_mtz.write_mtz(os.path.join(outputmtz_path, concrete_filename + ".mtz"))
 
         if self.verbose:
             print(f"LS before:  {metric[0]:.1f}", f"LS after: {metric[2]:.0f}", flush=True)
@@ -319,7 +320,7 @@ class Scaler_pool(object):
             
         metrics_df = pd.DataFrame(metrics)
         metrics_df.columns=['file', 'start_LS', 'start_corr', 'end_LS', 'end_corr']
-        metrics_df.to_pickle(outputmtz_path + prefix + 'scaling_metrics.pkl')
-        print("Scaling metrics have been saved at:", outputmtz_path + prefix + 'scaling_metrics.pkl', flush=True)
+        metrics_df.to_pickle(os.path.join(outputmtz_path, prefix + 'scaling_metrics.pkl'))
+        print("Scaling metrics have been saved at:", os.path.join(outputmtz_path, prefix + 'scaling_metrics.pkl'), flush=True)
         return metrics_df
     

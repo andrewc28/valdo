@@ -160,7 +160,7 @@ def apply_determine_locations(row, additional_args):
     folder=additional_args[0]
     
     # find mtz file for sample number
-    mtz_file = folder + row['sample'] + '.mtz'
+    mtz_file = os.path.join(folder, row['sample'] + '.mtz')  # valdo-easy: was folder + sample
     if mtz_file is None:
         return pd.Series({'fractional': np.nan, 'all_possible_frac': np.nan, 'all_possible_cart': np.nan})
     

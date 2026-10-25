@@ -23,14 +23,17 @@ the ``refine`` stage of ``valdo run``, but
 Programs
 --------
 phenix
-    ``phenix.refine <pdb> <mtz> output.prefix=refine_<stem> <eff> --overwrite``,
-    as valdo.refine runs it, with the packaged ``refine_drug.eff`` by default.
-    The packaged .eff names an R-free flags file on the original authors'
-    cluster; when that file does not exist the line is dropped from the copy
-    that is used (``phenix_refine.eff`` in the output folder). When the MTZ
-    holds more than one amplitude array, or no R-free flags, the matching
-    ``xray_data`` options are added. Map coefficients: 2FOFCWT/PH2FOFCWT and
-    FOFCWT/PHFOFCWT.
+    ``phenix.refine <pdb> <mtz> output.prefix=refine_<stem> <eff>
+    miller_array.labels.name=<F>,<SIGF> [xray_data.r_free_flags.generate=True]
+    xray_data.r_free_flags.ignore_pdb_hexdigest=True [xray_data.twin_law=<law>] <extra args>
+    --overwrite``, as valdo.refine runs it plus what PHENIX 1.20 and later need (checked with
+    PHENIX 1.21.2-5419 and 2.2.1-6174, see :func:`_build_command`), with the packaged
+    ``refine_drug.eff`` by default. The copy that is used (``phenix_refine.eff`` in the output
+    folder) is repaired where real PHENIX rejects upstream's file (:func:`prepare_eff`).
+    Outputs: ``runs/<stem>/refine_<stem>_001.{mtz,pdb,log}`` (``.cif`` when the .eff asks for it;
+    ``refine_<stem>_data.mtz`` holds generated R-free flags). Map coefficients: 2FOFCWT/PH2FOFCWT
+    and FOFCWT/PHFOFCWT (also FC/PHFC with the packaged .eff, 2FOFCWT_no_fill with PHENIX's
+    defaults).
 dimple
     ``dimple input.mtz <pdb> runs/<stem>/dimple --fcolumn F --sigfcolumn SIGF``
     plus ``--free-r-flags input.mtz --freecolumn FreeR_flag=N`` when the MTZ
@@ -45,7 +48,33 @@ dimple
     origin shift (rare, e.g. P 21 21 21 with a = b) the dataset fails with
     that reason. Map coefficients: FWT/PHWT and DELFWT/PHDELWT.
 
-Neither program is bundled; :func:`detect_programs` reports what is on PATH.
+Neither program is bundled. :func:`detect_programs` reports what is on PATH; with
+``program_info`` (from :func:`valdo.easy.programs.resolve`, i.e. ``programs.phenix`` /
+``programs.ccp4`` in valdo.yaml) the program and its environment come from that installation
+instead.
+
+Twin refinement (``twin_law``)
+------------------------------
+phenix
+    ``xray_data.twin_law=<law>`` is added to the command line (a bare ``twin_law=`` is ambiguous in
+    PHENIX 1.21 and 2.2); phenix.refine refines that law's twin fraction (target twin_lsq_f). The
+    law and fraction are read from the refined model (mmCIF ``_pdbx_reflns_twin``, PDB REMARK 3
+    "TWINNING INFORMATION") or the log; the formats are those of real PHENIX 1.21.2 and 2.2.1 runs
+    (:func:`valdo.easy.twin.parse_phenix_twin`). PHENIX does not check the law: valdo does
+    (``valdo check``).
+dimple
+    ``--refmac-key twin`` is added: dimple passes the keyword to its jelly-body and final
+    restrained refmacat runs (not to the rigid-body refmac5 run or molecular replacement), and
+    REFMAC finds the twin laws itself, keeps those with a twin fraction of at least 0.07 and
+    refines their fractions. The law(s) REFMAC kept (REMARK 3 "TWIN DETAILS" of final.pdb,
+    ``_pdbx_reflns_twin`` of final.mmcif) are compared with ``twin_law`` and reported.
+
+With twinned data the amplitudes of the refined MTZ no longer identify its indexing (REFMAC writes
+detwinned amplitudes, and at a twin fraction near 0.5 both indexings fit equally well), so in twin
+mode the frame is taken from the program instead: phenix.refine never re-indexes; dimple
+re-indexes only when its log shows that pointless ran with an ``alt_reindex`` result, and then its
+``reindexed.mtz`` is compared exactly with the input amplitudes (fallback: the ``alt_reindex``
+record of dimple.log). Without ``twin_law`` the frame is found as before.
 """
 
 import concurrent.futures as cf
@@ -71,7 +100,7 @@ SUMMARY_COLUMNS = [
 ]
 EXTRA_COLUMNS = [
     "Rw_start", "Rf_start", "seconds", "reason", "reindex_op", "f_col", "sigf_col",
-    "free_col", "skipped",
+    "free_col", "skipped", "program_version", "twin_law", "twin_fraction", "twin_note",
 ]
 
 PROGRAM_EXECUTABLES = {"phenix": "phenix.refine", "dimple": "dimple"}
@@ -81,6 +110,13 @@ MAP_COEFFICIENTS = {
 }
 
 RESULT_FILE = "result.json"
+# Added to the reason when a refined MTZ fits the input under two indexings (without twin refinement)
+TWIN_HINT = ("both indexings fit, as for twinned data: if the crystals are twinned, set phases.twin_law "
+             "('valdo check' lists the possible laws)")
+# Twin mode: the refined amplitudes must still resemble the input under the operator taken from the
+# program (REFMAC's detwinned F: CC 0.89-0.999 against the twinned input for twin fractions 0.5-0.05,
+# S2 benchmark data, CCP4 9); this only catches gross mix-ups.
+TWIN_FRAME_MIN_CC = 0.5
 # Indexing-frame detection of refined MTZs (find_frame_op). dimple/refmac write the observed
 # amplitudes after anisotropic scaling, so CC(input F, refined F) in the right frame is not 1:
 # 0.977-0.9998 on 39 PTP1B datasets (CCP4 9, dimple 2.7), against 0.47 under the wrong indexing
@@ -90,6 +126,9 @@ FRAME_MIN_CC = 0.9
 FRAME_MIN_MARGIN = 0.1
 RUN_MARKER = ".valdo_refine_run"
 FINGERPRINT_VERSION = 1
+# Version of the phenix.refine command line (part of PHENIX results' fingerprints). 2: data labels with
+# miller_array.labels.name, ignore_pdb_hexdigest, xray_data.twin_law, '--overwrite' last, repaired .eff.
+PHENIX_COMMAND_VERSION = 2
 
 # Amplitude columns that are map coefficients or model values, never data.
 _NOT_DATA = {
@@ -168,11 +207,21 @@ def packaged_eff_path():
 def prepare_eff(eff, out_dir):
     """Write the .eff file phenix.refine will use and return (path, notes).
 
-    ``eff=None`` uses the packaged refine_drug.eff; its
-    ``xray_data.r_free_flags.file_name=...`` line points at a file on the
-    authors' cluster and is dropped when that file does not exist here. A
-    user-supplied .eff is copied unchanged, but every ``file_name=`` it names
-    must exist (otherwise RefineError, before anything runs).
+    ``eff=None`` uses the packaged refine_drug.eff (upstream's file, unchanged on disk), with three
+    repairs, each reported in the notes, so that real PHENIX (1.21.2-5419, 2.2.1-6174) reads it:
+
+    * its ``xray_data.r_free_flags.file_name=...`` line points at a file on the authors' cluster and
+      is dropped when that file does not exist here;
+    * its ``refine {`` scope is not closed before ``main {``, so the file as a whole never closes:
+      PHENIX did not read it at all ("not a recognized phil file", and the run silently used
+      PHENIX's defaults). The missing ``}`` is added before ``main {`` (``refinement.main`` is not
+      part of ``refinement.refine``);
+    * ``output.quiet`` is not a phenix.refine parameter (PHENIX stops at it once the file is read)
+      and is dropped.
+
+    A user-supplied .eff is copied unchanged, but every ``file_name=`` it names must exist and its
+    braces must balance (PHENIX ignores a file whose braces do not); otherwise RefineError, before
+    anything runs.
     """
     notes = []
     if eff is None:
@@ -189,8 +238,18 @@ def prepare_eff(eff, out_dir):
                 if path is not None and not os.path.isfile(path):
                     notes.append(f"dropped from the packaged .eff (file not found here): {line.strip()}")
                     continue
+                if re.match(r"^\s*quiet\s*=", line.split("#", 1)[0]):
+                    notes.append(f"dropped from the packaged .eff (not a phenix.refine parameter): "
+                                 f"output.{line.strip()}")
+                    continue
                 kept.append(line)
-        text = "".join(kept)
+        text, closed = _close_refine_before_main("".join(kept))
+        if closed:
+            notes.append("repaired the packaged .eff: closed its 'refine {' scope before 'main {' "
+                         "(PHENIX did not read the file otherwise)")
+        if _brace_balance(text) != 0:
+            raise RefineError(f"the packaged PHENIX parameter file {src} has unbalanced braces that valdo "
+                              "cannot repair; give your own .eff file (advanced.refine.eff).")
         origin = src
     else:
         eff = os.path.abspath(os.path.expanduser(eff))
@@ -205,11 +264,48 @@ def prepare_eff(eff, out_dir):
                     f"{eff} refers to a file that does not exist: {path}\n"
                     "Fix the path or delete that line from the .eff file."
                 )
+        balance = _brace_balance(text)
+        if balance != 0:
+            raise RefineError(
+                f"{eff}: its braces do not balance ({'more' if balance > 0 else 'fewer'} '{{' than '}}'), "
+                "so PHENIX would ignore the whole file and refine with its defaults. Fix the file.")
         origin = eff
     dest = os.path.join(out_dir, "phenix_refine.eff")
     header = f"# used by valdo-easy refine; source: {origin}\n"
     _atomic_write_text(dest, header + text)
     return dest, notes
+
+
+def _phil_tokens(line):
+    """'name {' and '}' tokens of one .eff line (comments and quoted text left out)."""
+    code = re.sub(r'"[^"]*"', '""', line.split("#", 1)[0])
+    return [m.group(1) or "}" for m in re.finditer(r"([A-Za-z_][\w.]*)\s*\{|\}", code)]
+
+
+def _brace_balance(text):
+    """Number of '{' minus number of '}' (comments and quoted text left out)."""
+    tokens = [t for line in text.splitlines() for t in _phil_tokens(line)]
+    return sum(1 for t in tokens if t != "}") - tokens.count("}")
+
+
+def _close_refine_before_main(text):
+    """Close a ``refine {`` scope that is still open where ``main {`` starts. Returns (text, changed)."""
+    out, stack, changed = [], [], False
+    for line in text.splitlines(keepends=True):
+        tokens = _phil_tokens(line)
+        if tokens[:1] == ["main"] and stack and stack[-1] == "refine":
+            indent = re.match(r"^\s*", line).group(0)
+            out.append(f"{indent}}}  # closes 'refine {{' (added by valdo-easy)\n")
+            stack.pop()
+            changed = True
+        out.append(line)
+        for token in tokens:
+            if token == "}":
+                if stack:
+                    stack.pop()
+            else:
+                stack.append(token)
+    return "".join(out), changed
 
 
 def inspect_mtz(path, f_col=None, sigf_col=None, free_col=None):
@@ -369,6 +465,20 @@ def _choose_frame(ccs, min_cc=FRAME_MIN_CC, min_margin=FRAME_MIN_MARGIN):
     return ranked[0][0]
 
 
+def _phenix_identity(ccs, min_cc=FRAME_MIN_CC, min_margin=FRAME_MIN_MARGIN):
+    """phenix.refine never re-indexes, and its refined MTZ carries the input's own amplitudes, so the
+    identity stands when :func:`_choose_frame` cannot decide because twinned amplitudes also fit a
+    twin law (real PTP1B data, PHENIX 1.21.2 and 2.2.1: x,y,z 1.000, -x,-y,z 0.921). Returns the other
+    operators that came within ``min_margin`` of the identity ({triplet: cc}; the ones that kept
+    :func:`_choose_frame` from deciding), or None when the identity is not the best operator or is
+    below ``min_cc`` (a gross mix-up, which still fails)."""
+    finite = {k: v for k, v in ccs.items() if np.isfinite(v)}
+    ident = finite.get("x,y,z")
+    if ident is None or ident < min_cc or ident < max(finite.values()):
+        return None
+    return {k: v for k, v in finite.items() if k != "x,y,z" and ident - v < min_margin}
+
+
 def find_frame_op(input_mtz, refined_mtz, f_input, f_refined=None, min_cc=FRAME_MIN_CC,
                   min_margin=FRAME_MIN_MARGIN):
     """Find the indexing operator that maps ``refined_mtz`` onto ``input_mtz``.
@@ -520,7 +630,8 @@ def reindex_model(pdb_in, pdb_out, op, normalise=True):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), timeout_min=60, log=print):
+def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), timeout_min=60, log=print,
+                    twin_law=None, program_info=None):
     """Refine every dataset in ``jobs`` with ``program`` and summarise.
 
     Parameters
@@ -529,7 +640,8 @@ def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), tim
         One dict per dataset: ``stem`` (e.g. "0001_0", the file stem used
         downstream), ``id`` ("0001"), ``symop`` ("0", or "" without reindex),
         ``mtz`` and ``pdb`` (paths). Optional: ``f_col``/``sigf_col`` (data
-        columns; auto-detected otherwise), ``free_col`` (R-free column).
+        columns; auto-detected otherwise), ``free_col`` (R-free column),
+        ``twin_law`` (this job's twin law, with ``twin_law`` set).
     program : {"phenix", "dimple"}
     out_dir : str
         Folder for ``runs/<stem>/``, ``phases/``, ``models/`` and
@@ -544,6 +656,15 @@ def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), tim
         Per-dataset wall-clock limit; None or <= 0 disables it.
     log : callable
         Called with one progress string at a time (from the calling thread).
+    twin_law : str, optional
+        Twin refinement with this law (hkl notation, in the setting of the jobs' MTZs, e.g.
+        "-h,-k,l"; a job's own ``twin_law`` key takes precedence for that job): phenix.refine gets
+        ``xray_data.twin_law=<law>``, dimple ``--refmac-key twin``. None (default) = no twin
+        refinement, exactly as before.
+    program_info : dict, optional
+        :func:`valdo.easy.programs.resolve` result: the executable and the environment to run
+        it in (``programs.phenix`` / ``programs.ccp4`` in valdo.yaml). None = the program on PATH
+        in valdo's own environment (as before).
 
     Returns
     -------
@@ -559,13 +680,44 @@ def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), tim
     """
     if program not in PROGRAM_EXECUTABLES:
         raise RefineError(f"unknown refinement program {program!r}; use 'phenix' or 'dimple'")
-    exe = shutil.which(PROGRAM_EXECUTABLES[program])
-    if exe is None:
-        hint = ("source <ccp4>/bin/ccp4.setup-sh (CCP4 9 provides dimple and refmac5)"
-                if program == "dimple" else
-                "source <phenix>/phenix_env.sh (PHENIX needs a licence; see phenix-online.org)")
-        raise RefineError(f"{PROGRAM_EXECUTABLES[program]} is not on PATH. Fix: {hint}, "
-                          "then run again.")
+    version, where = None, None
+    if program_info is not None:
+        if program_info.get("program") != program:
+            raise RefineError(f"program_info describes {program_info.get('program')!r}, not {program!r}")
+        if program_info.get("error"):
+            err = program_info["error"]
+            raise RefineError(f"{err['what']}. Fix: {err['fix']}")
+        exe = program_info["exe"]
+        base_env = program_info.get("env")
+        version = program_info.get("version")
+        from valdo.easy.programs import describe
+        where = describe(program_info)
+    else:
+        exe = shutil.which(PROGRAM_EXECUTABLES[program])
+        base_env = None
+        if exe is None:
+            hint = ("set programs.ccp4 in valdo.yaml to your CCP4 folder, or source <ccp4>/bin/ccp4.setup-sh "
+                    "(CCP4 9 provides dimple and refmac5)" if program == "dimple" else
+                    "set programs.phenix in valdo.yaml to your PHENIX folder, or source <phenix>/phenix_env.sh "
+                    "(PHENIX needs a licence; see phenix-online.org)")
+            raise RefineError(f"{PROGRAM_EXECUTABLES[program]} is not on PATH. Fix: {hint}, "
+                              "then run again.")
+    extra_args = [str(a) for a in extra_args]
+    if twin_law:
+        from valdo.easy import twin
+        if twin.is_auto(twin_law):
+            raise RefineError("twin law 'auto' must be resolved first: 'valdo check' and 'valdo run' resolve it "
+                              "from the reference dataset's lattice")
+        try:
+            twin_law = twin.normalise_text(twin_law)
+        except twin.TwinLawError as exc:
+            raise RefineError(f"twin law: {exc}") from None
+        clash = twin.twin_in_extra_args(program, extra_args)
+        if clash:
+            raise RefineError(f"the twin law is given twice: phases.twin_law and '{clash}' in the extra "
+                              "arguments; set it in one place: phases.twin_law")
+    else:
+        twin_law = None
     jobs = _check_jobs(jobs)
     out_dir = os.path.abspath(os.path.expanduser(out_dir))
     for sub in ("runs", "phases", "models"):
@@ -574,16 +726,22 @@ def refine_datasets(jobs, program, out_dir, ncpu=1, eff=None, extra_args=(), tim
     for note in eff_notes:
         log(f"[refine] note: {note}")
     timeout_s = None if not timeout_min or timeout_min <= 0 else float(timeout_min) * 60.0
-    env = dict(os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
     ctx = _Context(program=program, exe=exe, out_dir=out_dir, eff_path=eff_path,
-                   extra_args=[str(a) for a in extra_args], timeout_s=timeout_s, env=env)
+                   extra_args=extra_args, timeout_s=timeout_s, env=env, twin_law=twin_law,
+                   version=version, where=where)
 
     results = {}
     total = len(jobs)
     n_workers = max(1, min(int(ncpu or 1), total)) if total else 1
     log(f"[refine] {program}: {total} dataset(s), {n_workers} at a time, "
         f"timeout {('none' if timeout_s is None else f'{timeout_min:g} min')}, output {out_dir}")
+    log(f"[refine] program: {where or exe}")
+    if twin_law:
+        log(f"[refine] twin refinement, twin law {twin_law}"
+            + (" (REFMAC finds the twin laws itself: --refmac-key twin; the law it keeps is compared with this one)"
+               if program == "dimple" else ""))
     t_start = time.time()
     pool = cf.ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="valdo-refine")
     previous_handler = None
@@ -705,6 +863,12 @@ def _check_jobs(jobs):
         j["symop"] = "" if j["symop"] is None else str(j["symop"])
         j["mtz"] = os.path.abspath(os.path.expanduser(str(job["mtz"])))
         j["pdb"] = os.path.abspath(os.path.expanduser(str(job["pdb"])))
+        if j.get("twin_law"):
+            from valdo.easy import twin
+            try:
+                j["twin_law"] = twin.normalise_text(j["twin_law"])
+            except twin.TwinLawError as exc:
+                raise RefineError(f"refine job {stem}: twin law: {exc}") from None
         out.append(j)
     return out
 
@@ -731,6 +895,10 @@ def _record(stem, ctx, job=None, **kw):
         "sigf_col": "",
         "free_col": "",
         "skipped": False,
+        "program_version": getattr(ctx, "version", None) or "",
+        "twin_law": "",
+        "twin_fraction": math.nan,
+        "twin_note": "",
     }
     rec.update(kw)
     return rec
@@ -763,7 +931,9 @@ def _run_one(job, ctx):
             and _fingerprints_equal(previous.get("fingerprint"), fingerprint)
             and os.path.isfile(phases_dest) and os.path.isfile(model_dest)):
         rec = {k: previous.get(k, v) for k, v in _record(stem, ctx, job=job).items()}
-        rec.update(skipped=True, phases_mtz=phases_dest, model_pdb=model_dest)
+        # the version that made this result (empty if it was not recorded), not today's
+        rec.update(skipped=True, phases_mtz=phases_dest, model_pdb=model_dest,
+                   program_version=previous.get("program_version") or "")
         return rec
 
     try:
@@ -784,6 +954,7 @@ def _run_one(job, ctx):
     log_path = os.path.join(run_dir, "refine.log")
     with open(log_path, "w") as fh:
         fh.write(f"# valdo-easy refine ({ctx.program}) {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"# program: {ctx.where or ctx.exe}\n")
         fh.write(f"# cwd: {run_dir}\n# command: {shlex.join(cmd)}\n\n")
         fh.flush()
         rc, timed_out, launch_error = _run_process(cmd, run_dir, fh, ctx)
@@ -805,13 +976,18 @@ def _run_one(job, ctx):
         r, phases_src, model_src = _collect_outputs(ctx, run_dir, stem, log_path)
     except _OutputError as exc:
         return _finish_failed(job, ctx, run_dir, str(exc), t0, fingerprint=fingerprint, **base)
+    law = _twin_law_of(job, ctx)
+    frame_notes = []
     try:
-        op_text = _normalise(ctx.program, job, info, phases_src, model_src, phases_dest, model_dest)
+        op_text, frame_op = _normalise(ctx.program, job, info, phases_src, model_src, phases_dest, model_dest,
+                                       run_dir=run_dir, twin=bool(law), notes=frame_notes)
     except _OutputError as exc:
         return _finish_failed(job, ctx, run_dir, str(exc), t0, fingerprint=fingerprint, **base)
-    reason = ""
+    if law:
+        base.update(_twin_outcome(ctx, run_dir, stem, model_src, frame_op, law))
+    reason = "; ".join(frame_notes)
     if not _finite(r.get("Rf_final")):
-        reason = "refinement finished but R-free could not be read from its output"
+        reason = (reason + "; " if reason else "") + "refinement finished but R-free could not be read from its output"
     if op_text:
         reason = (reason + "; " if reason else "") + (
             f"{ctx.program} re-indexed the data with {op_text} to match the model; phases and model "
@@ -865,22 +1041,40 @@ def _write_dimple_input(src, dest, info):
 
 def _build_command(ctx, job, info, run_dir, run_mtz=None):
     extra = list(ctx.extra_args)
+    twin = _twin_law_of(job, ctx)
     if ctx.program == "phenix":
-        cmd = [ctx.exe, job["pdb"], job["mtz"], f"output.prefix=refine_{job['stem']}",
-               ctx.eff_path, "--overwrite"]
-        joined = " ".join(extra)
-        if info["n_amplitude_pairs"] > 1 and "xray_data.labels" not in joined:
-            cmd.append(f"xray_data.labels={info['f_col']},{info['sigf_col']}")
-        if "r_free_flags" not in joined:
+        # PHENIX 1.20 and later (checked with 1.21.2-5419 and 2.2.1-6174): the data columns are chosen
+        # with miller_array.labels.name (xray_data.labels and xray_data.r_free_flags.label are accepted
+        # but only fill a GUI scope, so PHENIX would stop at 'Multiple equally suitable arrays', or
+        # prefer intensities over the amplitudes valdo uses); a bare twin_law= is ambiguous
+        # (xray_data.twin_law / neutron_data.twin_law); a start model refined against another R-free set
+        # (REMARK r_free_flags.md5.hexdigest, e.g. every PanDDA input model) stops the run unless
+        # ignore_pdb_hexdigest is set, which is what dimple does without asking. '--overwrite' comes last:
+        # PHENIX 1.x (Python 2.7 argparse) rejects parameters that follow an option.
+        cmd = [ctx.exe, job["pdb"], job["mtz"], f"output.prefix=refine_{job['stem']}", ctx.eff_path]
+        keys = [a.split("=", 1)[0].strip() for a in extra if "=" in a]
+
+        def given(*parts):
+            return any(part in key for key in keys for part in parts)
+
+        if not given("labels"):
+            cmd.append(f"miller_array.labels.name={info['f_col']},{info['sigf_col']}")
+        if not given("r_free_flags.generate", "r_free_flags.label", "labels"):
             if info["free_col"] is None:
                 cmd.append("xray_data.r_free_flags.generate=True")
             elif info.get("n_free_candidates", 1) > 1:
-                cmd.append(f"xray_data.r_free_flags.label={info['free_col']}")
-        return cmd + extra
+                cmd.append(f"miller_array.labels.name={info['free_col']}")
+        if not given("ignore_pdb_hexdigest"):
+            cmd.append("xray_data.r_free_flags.ignore_pdb_hexdigest=True")
+        if twin:
+            cmd.append(f"xray_data.twin_law={twin}")
+        return cmd + extra + ["--overwrite"]
     run_mtz = run_mtz or job["mtz"]
     cmd = [ctx.exe, run_mtz, job["pdb"], os.path.join(run_dir, "dimple"), "--fcolumn", "F", "--sigfcolumn", "SIGF"]
     if info["free_col"] and not any(a.startswith(("--free-r-flags", "-R", "--freecolumn")) for a in extra):
         cmd += ["--free-r-flags", run_mtz, "--freecolumn", f"FreeR_flag={info['free_value']}"]
+    if twin:   # REFMAC finds the twin laws itself (jelly-body and final restrained runs of dimple)
+        cmd += ["--refmac-key", "twin"]
     return cmd + extra
 
 
@@ -959,10 +1153,13 @@ def _collect_outputs(ctx, run_dir, stem, log_path):
     return r, mtz, model
 
 
-def _normalise(program, job, info, phases_src, model_src, phases_dest, model_dest):
+def _normalise(program, job, info, phases_src, model_src, phases_dest, model_dest, run_dir=None, twin=False,
+               notes=None):
     """Copy (or transform) refined outputs into phases/ and models/.
 
-    Returns the operator triplet when the program re-indexed the data, else "".
+    Returns (operator triplet when the program re-indexed the data else "", the gemmi.Op used to
+    bring the outputs back into the input's indexing). With ``twin`` the indexing is taken from the
+    program (:func:`_twin_frame_op`) instead of the amplitudes.
     """
     import gemmi
 
@@ -982,13 +1179,26 @@ def _normalise(program, job, info, phases_src, model_src, phases_dest, model_des
         raise _OutputError(
             f"the refined MTZ is in space group {refined.spacegroup.hm} but the input is {in_sg} "
             "(the program probably ran molecular replacement); the dataset cannot be used")
-    op, cc, ccs = find_frame_op(job["mtz"], phases_src, info["f_col"])
+    if twin:
+        op = _twin_frame_op(program, job, info, run_dir, phases_src)
+        cc, ccs = None, {}
+    else:
+        op, cc, ccs = find_frame_op(job["mtz"], phases_src, info["f_col"])
+        others = _phenix_identity(ccs) if op is None and program == "phenix" else None
+        if others is not None:
+            op = gemmi.Op("x,y,z")
+            if others and notes is not None:
+                also = ", ".join(f"{k} (CC {v:.3f})" for k, v in others.items())
+                notes.append(f"the refined amplitudes also fit {also}; phenix.refine keeps the input indexing "
+                             f"(x,y,z, CC {ccs['x,y,z']:.3f}), so that one was used; {TWIN_HINT}")
     if op is None:
         if ccs:
+            both = sum(1 for v in ccs.values() if np.isfinite(v) and v >= FRAME_MIN_CC) > 1
             raise _OutputError(
                 "could not relate the refined MTZ to the input data (best amplitude CC "
                 f"{cc:.3f}; tried {', '.join(f'{k}: {v:.3f}' for k, v in ccs.items())}; need >= "
-                f"{FRAME_MIN_CC} and {FRAME_MIN_MARGIN} more than any other operator)")
+                f"{FRAME_MIN_CC} and {FRAME_MIN_MARGIN} more than any other operator)"
+                + (f"; {TWIN_HINT}" if both else ""))
         op_text = ""  # nothing comparable: assume the program kept the indexing
         identity = True
     else:
@@ -1014,7 +1224,172 @@ def _normalise(program, job, info, phases_src, model_src, phases_dest, model_des
     else:
         reindex_mtz(phases_src, phases_dest, op)
         reindex_model(model_src, model_dest, op)
-    return op_text
+    return op_text, (op if op is not None else gemmi.Op("x,y,z"))
+
+
+def _twin_frame_op(program, job, info, run_dir, phases_src):
+    """Twin mode: the operator that maps the refined MTZ's indexing onto the input's.
+
+    phenix.refine never re-indexes (identity). dimple (2.7, main.py) runs pointless when the data
+    and model symmetry match, and refines pointless's reindexed.mtz when pointless succeeded with an
+    ``alt_reindex`` list (recorded in the [pointless] section of dimple.log); otherwise it refines
+    the input as given. reindexed.mtz holds exactly the input amplitudes in the new indexing, so the
+    operator is the candidate under which they agree exactly (fallback: the inverse of the first,
+    chosen, alt_reindex operator). A loose correlation check then catches gross mix-ups."""
+    import gemmi
+    op = gemmi.Op("x,y,z")
+    if program == "dimple" and run_dir:
+        ddir = os.path.join(run_dir, "dimple")
+        log_text = _read_text(os.path.join(ddir, "dimple.log"))
+        if not log_text:
+            raise _OutputError("dimple wrote no dimple.log, so it is unknown whether it re-indexed the data; "
+                               "the phases cannot be placed safely")
+        if _dimple_used_reindexed(log_text):
+            found = None
+            reindexed = os.path.join(ddir, "reindexed.mtz")
+            if os.path.isfile(reindexed):
+                found = _exact_frame_op(os.path.join(run_dir, "input.mtz"), reindexed)
+            if found is None:
+                found = _dimple_log_reindex_op(os.path.join(ddir, "dimple.log"))
+            if found is None:
+                raise _OutputError("dimple re-indexed the data (pointless), but neither reindexed.mtz nor the "
+                                   "alt_reindex record of dimple.log says how; the phases cannot be placed safely")
+            op = found
+    cc = _frame_cc(job["mtz"], phases_src, info["f_col"], op)
+    if cc is not None and not cc >= TWIN_FRAME_MIN_CC:
+        raise _OutputError(f"the refined MTZ does not match the input data (amplitude CC {cc:.3f} under "
+                           f"{op.triplet()}; need >= {TWIN_FRAME_MIN_CC})")
+    return op
+
+
+def _dimple_used_reindexed(log_text):
+    """True if dimple refined pointless's reindexed.mtz: dimple.log has a [pointless] section with a
+    non-empty alt_reindex list and pointless succeeded (dimple 2.7 main.py uses reindexed.mtz exactly
+    then; its workflow writes an ``exit_status:`` line into the section only for a non-zero status)."""
+    section = re.search(r"^\[pointless\]\s*$(.*?)(?=^\[|\Z)", log_text, re.M | re.S)
+    return bool(section and re.search(r"^alt_reindex:\s*\[\s*\{", section.group(1), re.M)
+                and not re.search(r"^exit_status:", section.group(1), re.M))
+
+
+def _candidate_ops(mtz_path):
+    import gemmi
+    ops = [gemmi.Op("x,y,z")]
+    try:
+        m = gemmi.read_mtz_file(mtz_path)
+        ops += list(gemmi.find_twin_laws(m.cell, m.spacegroup, 3.0, False))
+    except Exception:  # pragma: no cover - unusual lattices
+        pass
+    return ops
+
+
+def _exact_frame_op(input_mtz, reindexed_mtz, column="F", tolerance=1e-3):
+    """The operator under which ``reindexed_mtz`` holds exactly the amplitudes of ``input_mtz``."""
+    import reciprocalspaceship as rs
+    try:
+        ref = rs.read_mtz(input_mtz)[[column]].dropna().hkl_to_asu()[[column]]
+        other = rs.read_mtz(reindexed_mtz)[[column]].dropna()
+    except Exception:
+        return None
+    ref = ref[~ref.index.duplicated()]
+    for op in _candidate_ops(input_mtz):
+        cand = other if op.triplet() == "x,y,z" else other.apply_symop(op)
+        cand = cand.hkl_to_asu()[[column]]
+        cand = cand[~cand.index.duplicated()]
+        joined = ref.join(cand, how="inner", rsuffix="_re")
+        if len(joined) < max(50, 0.9 * len(ref)):
+            continue
+        a = joined.iloc[:, 0].to_numpy(dtype=float)
+        b = joined.iloc[:, 1].to_numpy(dtype=float)
+        if np.mean(np.abs(a - b) <= tolerance * np.maximum(1.0, np.abs(a))) >= 0.99:
+            return op
+    return None
+
+
+def _dimple_log_reindex_op(path):
+    """The re-indexing dimple chose, from the alt_reindex record of dimple.log (first = chosen)."""
+    import gemmi
+    m = re.search(r"^alt_reindex:\s*(\[.*\])\s*$", _read_text(path), re.M)
+    if not m:
+        return None
+    try:
+        first = json.loads(m.group(1))[0]["op"]
+    except (ValueError, IndexError, KeyError, TypeError):
+        return None
+    from valdo.easy import twin
+    try:
+        matrix = twin.parse_law(str(first).strip("[]"))
+    except twin.TwinLawError:
+        return None
+    if matrix == twin.IDENTITY:
+        return gemmi.Op("x,y,z")
+    # pointless's operator maps the input onto reindexed.mtz; the frame operator is its inverse
+    inv = twin.inverse(matrix)
+    rows = [[inv[i][j] for j in range(3)] for i in range(3)]
+    if any(x.denominator != 1 for row in rows for x in row):
+        return None
+    den = gemmi.Op.DEN
+    op = gemmi.Op("x,y,z")
+    op.rot = [[int(x * den) for x in row] for row in rows]
+    return op
+
+
+def _frame_cc(input_mtz, refined_mtz, f_input, op):
+    """Amplitude CC of the refined MTZ (brought into the input indexing with ``op``) with the input."""
+    import reciprocalspaceship as rs
+    try:
+        ref = rs.read_mtz(input_mtz)[[f_input]].dropna().hkl_to_asu()[[f_input]]
+        other_all = rs.read_mtz(refined_mtz)
+    except Exception:
+        return None
+    ref = ref[~ref.index.duplicated()]
+    f_refined = _pick_data_column(other_all, prefer=f_input)
+    if f_refined is None:
+        return None
+    other = other_all[[f_refined]].dropna()
+    cand = other if op.triplet() == "x,y,z" else other.apply_symop(op)
+    cand = cand.hkl_to_asu()[[f_refined]]
+    cand = cand[~cand.index.duplicated()]
+    joined = ref.join(cand, how="inner", rsuffix="_refined")
+    if len(joined) < 50:
+        return None
+    a = joined.iloc[:, 0].to_numpy(dtype=float)
+    b = joined.iloc[:, 1].to_numpy(dtype=float)
+    ok = np.isfinite(a) & np.isfinite(b)
+    return float(np.corrcoef(a[ok], b[ok])[0, 1]) if ok.sum() >= 50 else None
+
+
+def _twin_outcome(ctx, run_dir, stem, model_src, frame_op, law):
+    """twin_law / twin_fraction / twin_note of one twin refinement (configured law ``law``), in the
+    input's indexing."""
+    from valdo.easy import twin
+    out = {"twin_law": "", "twin_fraction": math.nan, "twin_note": ""}
+    try:
+        import gemmi
+        sg = gemmi.read_mtz_file(os.path.join(ctx.out_dir, "phases", f"{stem}.mtz")).spacegroup
+        rots = twin.rotations(sg) if sg is not None else None
+    except Exception:
+        rots = None
+    if ctx.program == "dimple":
+        ddir = os.path.join(run_dir, "dimple")
+        domains = twin.parse_refmac_twin(_read_text(os.path.join(ddir, "final.pdb")),
+                                         _read_text(os.path.join(ddir, "final.mmcif")))
+        identity = frame_op is None or frame_op.triplet() == "x,y,z"
+        law_used, fraction, note = twin.summarise_domains(domains, law, None if identity else frame_op, rots)
+        out.update(twin_law=law_used, twin_fraction=math.nan if fraction is None else fraction, twin_note=note)
+        return out
+    # phenix.refine writes refine_<stem>_001.* (another number only if the prefix was used before)
+    base = os.path.splitext(model_src)[0]
+    cif_text = _read_text(base + ".cif")
+    pdb_text = _read_text(model_src) if model_src.endswith(".pdb") else ""
+    found = twin.parse_phenix_twin(cif_text, pdb_text, _read_text(base + ".log"))
+    if found is None:
+        out.update(twin_law=law, twin_note="twin fraction not found in the phenix.refine output")
+        return out
+    note = ""
+    if rots is not None and not twin.same_law(twin.parse_law(found["law"]), twin.parse_law(law), rots):
+        note = f"phenix.refine reports twin law {found['law']}, not the configured {law}"
+    out.update(twin_law=law if not note else found["law"], twin_fraction=found["fraction"], twin_note=note)
+    return out
 
 
 def _all_in_asu(mtz):
@@ -1045,7 +1420,7 @@ def _fingerprint(job, ctx, info, run_dir):
         files[key] = _file_digest(job[key], old.get(key))
     if ctx.eff_path:
         files["eff"] = _file_digest(ctx.eff_path, old.get("eff"))
-    return {
+    fp = {
         "version": FINGERPRINT_VERSION,
         "program": ctx.program,
         "extra_args": list(ctx.extra_args),
@@ -1054,6 +1429,21 @@ def _fingerprint(job, ctx, info, run_dir):
         "free_col": info["free_col"],
         "files": files,
     }
+    if ctx.program == "phenix":          # the phenix.refine command line itself changed (see _build_command)
+        fp["command"] = PHENIX_COMMAND_VERSION
+    law = _twin_law_of(job, ctx)
+    if law:                              # only then: results refined without a twin law stay valid
+        fp["twin_law"] = law
+    return fp
+
+
+def _twin_law_of(job, ctx):
+    """The twin law to refine for ``job``: its own (an indexing variant can need another law than the
+    reference indexing, see twin.law_for_variant), else the one given to refine_datasets; None without
+    twin refinement."""
+    if not getattr(ctx, "twin_law", None):
+        return None
+    return job.get("twin_law") or ctx.twin_law
 
 
 def _file_digest(path, previous=None):

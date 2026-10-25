@@ -99,8 +99,15 @@ The most important decision is **where the phases come from** (`phases.source`):
 | `phases.source` | when | what you need |
 |---|---|---|
 | `input_mtz` | your MTZ files already contain map coefficients (typical for XChem / PanDDA inputs) | nothing more |
-| `refine` | your MTZ files hold only data | `--phases refine --program dimple` (CCP4) or `--program phenix` (your own PHENIX licence) |
+| `refine` | your MTZ files hold only data | `--phases refine --program dimple --ccp4 /path/to/ccp4-9` (CCP4) or `--program phenix --phenix /path/to/phenix-2.2-6143` (your own PHENIX licence) |
 | `existing` | you refined every dataset yourself | `--phases existing --existing '/path/refined/{name}.mtz'` |
+
+With `refine`, the installation folder ends up in `valdo.yaml` (`programs.ccp4` or
+`programs.phenix`; init fills it in from PATH when you leave out `--ccp4`/`--phenix`). That one
+line is all valdo needs: every command and batch job sets the program up from it (see
+[USER_GUIDE.md](USER_GUIDE.md#refinement-programs)). For twinned crystals add
+`--twin-law -h,-k,l`, or `--twin-law auto` when the lattice allows only one twin law
+(`valdo check` lists the possible laws; see [USER_GUIDE.md](USER_GUIDE.md#twinned-crystals)).
 
 Open `valdo.yaml` in a text editor and read part 1 ("your project") and part 2 ("detected by
 valdo init"). Part 3 ("advanced") holds the settings validated on the PTP1B screen; leave it
@@ -156,7 +163,8 @@ qsub run_valdo.sh                         # on SLURM clusters: sbatch run_valdo.
 
 `valdo jobscript` takes `--slots` (cores), `--hours`, `--mem-gb` (per core) and
 `--env-setup 'shell line'` (by default the script activates the environment you run
-`valdo jobscript` in; extra lines such as CCP4's setup script are added after it). Without
+`valdo jobscript` in; extra lines are added after it; PHENIX and CCP4 need no line when
+`programs.phenix`/`programs.ccp4` is set in `valdo.yaml`). Without
 `--hours` it sets the time limit from the number of data files: about 3 times the time measured
 on Wynton plus 15 minutes (e.g. 1 h for 300 datasets on 16 cores with phases in the data,
 2 h with dimple refinement); it prints the value and why. Look at the script before you submit
@@ -201,6 +209,7 @@ ones after them) run again. `valdo run --dry-run` shows what would run, without 
 | `valdo check` | 2 s (measured) | a few seconds (headers only) |
 | `valdo run`, 16 CPU cores, no GPU, phases in the data | 5 min (measured: 298 PTP1B datasets) | 51 min (measured: 1,677 PTP1B datasets) |
 | `valdo run` with `phases.source: refine` (dimple) | add about 1 minute per dataset per core (measured: 39 PTP1B datasets refined in 3 min on 16 cores, 44-65 s each), e.g. ~20 min for 300 datasets on 16 cores | add ~2 h on 16 cores |
+| `valdo run` with `phases.source: refine` (phenix) | add about 6-11 minutes per dataset per core (measured: 39 PTP1B datasets refined in 20 min on 16 cores with PHENIX 2.2.1, 33 min with 1.21.2), e.g. ~2-3.5 h for 300 datasets on 16 cores | add ~11-20 h on 16 cores |
 
 How these numbers were obtained: the full PTP1B screen (1,680 files, 1,677 usable, 500
 training epochs) was run with `valdo run` as an SGE job on one 16-core Wynton CPU node on

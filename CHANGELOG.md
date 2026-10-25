@@ -23,6 +23,20 @@ First release of valdo-easy, based on upstream VALDO 0.0.6, commit `1ec32c6`
   post-conditions and explanations of known errors; canonical dataset IDs and
   `<workdir>/datasets.csv` recording what happened to every dataset.
 - Refinement stage (`phases.source: refine`) with PHENIX or CCP4 dimple, in parallel and resumable.
+- `programs.phenix` / `programs.ccp4` in `valdo.yaml` (and `valdo init --phenix/--ccp4`, or
+  found on PATH by init): the installation folder, given once, sets up refinement for every
+  command and batch job (valdo sources the installation's setup script in a separate clean
+  `bash`); `valdo check` reports the program and version (`refine_program`) and warns when the
+  version differs from the one(s) that made the existing refinements (`program_changed`); the
+  version is recorded per dataset, and the report counts refined variants per version.
+- Twin refinement: `phases.twin_law` (and `valdo init --twin-law -h,-k,l`), checked against the
+  reference lattice (`valdo check` lists the possible laws), or `auto` for the only law the
+  lattice allows; phenix.refine gets `xray_data.twin_law=`, dimple `--refmac-key twin`; twin law,
+  fraction and note per dataset in `refine_summary.csv`, `datasets.csv` and the report. With twin
+  refinement the indexing of a refined MTZ is taken from the program, and the filter keeps the
+  indexing variant with the lower twin fraction (R-free cannot tell them apart). Checked with
+  real dimple 2.7 (CCP4 9) on twinned S2 datasets and with real phenix.refine 1.21.2-5419 and
+  2.2.1-6174 (twin records read from their model, mmCIF and log output).
 - Model-map check: with phases from the data files or the user's refined files, datasets whose
   model does not sit in the 2mFo-DFc density of their phases are flagged `model_map_mismatch`
   (focal tagging and viewer models would be unreliable for them).
@@ -44,6 +58,13 @@ First release of valdo-easy, based on upstream VALDO 0.0.6, commit `1ec32c6`
 - Packaging: `refine_drug.eff` and `VERSION` were not installed by `pip install .`.
 
 ### Fixed (valdo-easy, found in review before the release)
+- phenix.refine without a twin law: a dataset whose refined amplitudes also fit a twin law
+  (twinned data) was dropped at refine, because the indexing check needs a margin of 0.1 between
+  operators (one of 39 real PTP1B datasets: x,y,z 1.000, -x,-y,z 0.921, with PHENIX 1.21.2 and
+  2.2.1; dimple kept it). phenix.refine never re-indexes, so its result is now kept in the input
+  indexing, with the twin hint in its `reason`; dimple results are checked as before.
+- Twin refinement with phenix.refine: a refined twin fraction of 0 was described as "REFMAC kept
+  no twin domain" in the refine stage's message and the report.
 - A dataset whose refinement failed was still used to train the VAE (upstream filter keeps scaled
   files without an R-free row); such files now get a row that drops them, and filter/preprocess
   stop if anything else gets through.
@@ -70,6 +91,29 @@ First release of valdo-easy, based on upstream VALDO 0.0.6, commit `1ec32c6`
   cause that fits the problem.
 - `valdo jobscript`: the time limit is estimated from the number of datasets (was 24 h), the
   script sets `PYTHONNOUSERSITE=1`, and its notes match the situation.
+- phenix.refine (checked with real PHENIX 1.21.2-5419 and 2.2.1-6174; before, no dataset could
+  be refined with either): the data columns are given as `miller_array.labels.name` (PHENIX
+  ignored `xray_data.labels` and stopped at "Multiple equally suitable arrays", or refined
+  against intensities), `xray_data.r_free_flags.ignore_pdb_hexdigest=True` is set (PanDDA input
+  models stopped the run at "Please resolve the R-free flags mismatch"), `--overwrite` comes last
+  (PHENIX 1.x rejected every parameter after it), the twin law is `xray_data.twin_law` (a bare
+  `twin_law=` is ambiguous), and with several R-free columns the chosen one is named. The
+  packaged `refine_drug.eff` is copied with three repairs (PHENIX ignored it as shipped: an
+  unclosed scope, a missing R-free file, `output.quiet`); upstream's file is unchanged.
+  Results refined with the old command are refined again (`PHENIX_COMMAND_VERSION`).
+- Twin refinement: twin laws in `advanced.refine.extra_args` are refused (also with
+  `phases.twin_law` null), so the indexing check and the twin fraction always know about them;
+  in lattices with several non-commuting twin laws each indexing variant is refined with the
+  law as written in its own indexing; the phenix.refine twin fraction is read from the end of
+  refinement (not from the start of the last macro cycle); a refined MTZ that fits two
+  indexings without twin refinement gets a hint to set `phases.twin_law`, and `valdo run`
+  counts such datasets.
+- `programs.phenix` / `programs.ccp4`: also found for the PHENIX 1.x layout and a pasted
+  `source ...` line; a folder that holds installations lists them; a moved installation is
+  explained; `BASH_ENV`/`ENV` are not passed to the setup script; `valdo init --force` keeps
+  the programs of the file it replaces; `valdo status` compares versions only.
+- `valdo init --twin-law -h,-k,l` works without `=`, and usage errors are JSON results with
+  `--json` (`bad_options`).
 
 ### Changed
 - `valdo/VERSION` is `0.0.6+easy.1`.

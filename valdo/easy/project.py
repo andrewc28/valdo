@@ -86,6 +86,10 @@ SCHEMA = {
         "per_dataset": Field("pattern", None, "one model per dataset: a pattern with {name}, or a folder/glob whose file names contain the dataset name", nullable=True),
     },
     "workdir": Field("path", "valdo_run", "all results go here (relative paths are relative to this file)"),
+    "programs": {
+        "phenix": Field("program_path", None, "PHENIX installation folder (or its phenix_env.sh) for phases.program: phenix; valdo sources its setup script itself, for every command and batch job. null = phenix.refine from PATH", nullable=True),
+        "ccp4": Field("program_path", None, "CCP4 installation folder (or its bin/ccp4.setup-sh) for phases.program: dimple; null = dimple from PATH", nullable=True),
+    },
     "columns": {
         "amplitude": Field("str", "F-obs", "observed structure-factor amplitude column (same name in every file)", upstream="standardize.expcolumns"),
         "sigma": Field("str", "SIGF-obs", "its standard-deviation column", upstream="standardize.expcolumns"),
@@ -94,6 +98,7 @@ SCHEMA = {
         "source": Field("str", "input_mtz", "where map phases come from: input_mtz (map coefficients already in the data files), refine (refine every dataset), existing (your refined MTZs)", choices=["input_mtz", "refine", "existing"]),
         "existing": Field("pattern", None, "source: existing -> your refined MTZs (pattern with {name}, folder or glob)", nullable=True),
         "program": Field("str", None, "source: refine -> refinement program: phenix or dimple", choices=["phenix", "dimple"], nullable=True),
+        "twin_law": Field("twin_law", None, "source: refine -> twin refinement with this twin law (hkl notation, in the reference dataset's indexing, e.g. -h,-k,l; 'valdo check' lists the possible ones), or auto (the only twin law this crystal form allows); null = no twin refinement", nullable=True),
         "columns": {
             "fwt": Field("str", "2FOFCWT", "2mFo-DFc amplitude column in the phase files (context maps)", nullable=True),
             "phwt": Field("str", "PH2FOFCWT", "2mFo-DFc phase column (phases for the VALDO difference maps)", nullable=True, upstream="add_phases_and_blobs.phase_2FOFC_col_in"),
@@ -166,7 +171,7 @@ SCHEMA = {
     },
 }
 
-PATH_KINDS = ("path", "pattern")
+PATH_KINDS = ("path", "pattern", "program_path")
 
 
 def iter_fields(schema=SCHEMA, prefix=""):
@@ -249,6 +254,8 @@ def validate_project(raw, base_dir):
         if spec.required and value in (None, ""):
             errors.append(f"{dotted}: required. {spec.doc}.")
         if spec.kind in PATH_KINDS and value not in (None, ""):
+            if spec.kind == "program_path" and "$" in str(value):   # a batch job may lack the variable
+                project.setdefault("_unexpanded", {})[dotted] = str(value)
             set_value(project, dotted, expand_path(value, base_dir))
     errors.extend(_cross_checks(project))
     if errors:
@@ -317,10 +324,16 @@ def coerce(value, spec):
         return False, None, f"must not be empty (default: {format_scalar(spec.default)})"
     note = ""
     try:
-        if kind in ("str", "path", "pattern"):
+        if kind in ("str", "path", "pattern", "program_path"):
             if isinstance(value, (dict, list)):
                 return False, value, f"must be text, got {type(value).__name__}"
             value = str(value)
+            if kind == "program_path":     # also a pasted 'source /path/phenix_env.sh' line
+                from valdo.easy.programs import clean_setting
+                try:
+                    value, note = clean_setting(value)
+                except ValueError as exc:
+                    return False, value, str(exc)
         elif kind == "bool":
             if not isinstance(value, bool):
                 if isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "false", "no", "off"):
@@ -347,6 +360,19 @@ def coerce(value, spec):
             value = {"yes": "true", "no": "false", "on": "true", "off": "false"}.get(value, value)
             if value not in ("auto", "true", "false"):
                 return False, value, "must be auto, true or false"
+        elif kind == "twin_law":
+            from valdo.easy.twin import TwinLawError, normalise_setting
+            if isinstance(value, (dict, list, bool)) or isinstance(value, (int, float)):
+                return False, value, f"must be a twin law such as -h,-k,l, or auto (in quotes or not), got {value!r}"
+            if not str(value).strip():       # an empty value means no twin law, like null
+                return True, None, ""
+            try:
+                text = normalise_setting(value)
+            except TwinLawError as exc:
+                return False, value, f"{exc} (or auto: the twin law of the reference crystal form)"
+            if text != str(value).strip():
+                note = f"read the twin law {value!r} as {text}"
+            value = text
         elif kind == "when_opt":
             if isinstance(value, str) and value.strip().lower() in ("all", "never"):
                 value = value.strip().lower()
@@ -390,7 +416,8 @@ def coerce(value, spec):
 
 def _kind_name(kind):
     return {"int": "whole number", "float": "number", "list_int": "list of whole numbers",
-            "list_num": "list of numbers", "when_opt": "\"all\", \"never\" or number"}.get(kind, kind)
+            "list_num": "list of numbers", "when_opt": "\"all\", \"never\" or number",
+            "twin_law": "twin law such as -h,-k,l"}.get(kind, kind)
 
 
 def _cross_checks(p):
@@ -405,6 +432,21 @@ def _cross_checks(p):
                       "e.g. '/path/refined/{name}.mtz').")
     if phases["source"] == "refine" and not phases["program"]:
         errors.append("phases.program: required when phases.source is 'refine' (phenix or dimple).")
+    if phases.get("twin_law") and phases["source"] != "refine":
+        errors.append(f"phases.twin_law: only used for twin refinement (phases.source: refine), but phases.source is "
+                      f"'{phases['source']}'. Set phases.twin_law to null, or phases.source to refine.")
+    if phases["source"] == "refine" and phases["program"]:
+        from valdo.easy.twin import twin_in_extra_args
+        clash = twin_in_extra_args(phases["program"], p["advanced"]["refine"]["extra_args"])
+        if clash and phases.get("twin_law"):
+            errors.append(f"advanced.refine.extra_args: '{clash}' asks for twin refinement as well as "
+                          "phases.twin_law; set it in one place: remove it from extra_args and keep phases.twin_law.")
+        elif clash:
+            # without phases.twin_law valdo would check the refined indexing as for untwinned data, which
+            # twinned data fail (both indexings fit): every twinned dataset would be dropped at refine
+            errors.append(f"advanced.refine.extra_args: '{clash}' asks for twin refinement; set the twin law in "
+                          "phases.twin_law instead (and remove it from extra_args): only then does valdo handle "
+                          "the indexing of twin-refined data.")
     if phases["source"] in ("input_mtz", "existing") and (not phases["columns"]["phwt"] or not phases["columns"]["phdelwt"]):
         errors.append("phases.columns.phwt / phdelwt: the 2mFo-DFc and mFo-DFc phase column names are needed "
                       f"for phases.source '{phases['source']}'.")
@@ -455,7 +497,7 @@ def format_scalar(value):
 
 
 _SECTIONS = [
-    ("1. YOUR PROJECT  (please check these)", ["data", "models", "workdir"]),
+    ("1. YOUR PROJECT  (please check these)", ["data", "models", "workdir", "programs"]),
     ("2. DETECTED BY 'valdo init'  (change only if something is wrong)",
      ["columns", "phases", "reindex", "reference", "focal_residue", "validation", "compute"]),
     ("3. ADVANCED  (validated settings from the PTP1B screen; change only if you know why)",
@@ -463,8 +505,10 @@ _SECTIONS = [
 ]
 
 
-def render_project(project, header_lines=()):
-    """Return the text of a commented valdo.yaml for `project` (a nested dict)."""
+def render_project(project, header_lines=(), comments=None):
+    """Return the text of a commented valdo.yaml for `project` (a nested dict).
+
+    ``comments`` ({dotted key: text}) adds a comment line above that setting (e.g. what init found)."""
     from valdo import __version__
     lines = [
         "# valdo.yaml: VALDO project file",
@@ -479,24 +523,28 @@ def render_project(project, header_lines=()):
     for title, keys in _SECTIONS:
         lines += ["", "# " + "=" * 78, f"# {title}", "# " + "=" * 78]
         for key in keys:
-            _render(lines, key, SCHEMA[key], project.get(key), 0)
+            _render(lines, key, SCHEMA[key], project.get(key), 0, comments=comments or {})
     return "\n".join(lines) + "\n"
 
 
-def _render(lines, key, spec, value, indent):
+def _render(lines, key, spec, value, indent, comments=None, prefix=""):
     pad = "  " * indent
+    dotted = f"{prefix}{key}"
     if isinstance(spec, dict):
         lines.append(f"{pad}{key}:")
         value = value or {}
         for sub_key, sub_spec in spec.items():
-            _render(lines, sub_key, sub_spec, value.get(sub_key), indent + 1)
+            _render(lines, sub_key, sub_spec, value.get(sub_key), indent + 1, comments, dotted + ".")
         return
     text = f"{pad}{key}: {format_scalar(value)}"
+    extra = (comments or {}).get(dotted)
+    if extra:                # e.g. what init found: on its own line, above the setting
+        lines.append(f"{pad}# {extra}")
     lines.append(f"{text:<44} # {spec.doc}" if spec.doc else text)
 
 
-def write_project(project, path, header_lines=()):
-    text = render_project(project, header_lines)
+def write_project(project, path, header_lines=(), comments=None):
+    text = render_project(project, header_lines, comments)
     # Round-trip check: what we write must load back to the same settings.
     import yaml
     reloaded = yaml.safe_load(text)

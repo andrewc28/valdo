@@ -23,6 +23,10 @@ How the file is read:
   are matched to datasets by name.
 - Column "upstream" names the field of the upstream stage config (`<workdir>/configs/<stage>.yaml`)
   that the setting fills.
+- `programs.phenix` / `programs.ccp4` name a PHENIX or CCP4 installation. That one line is all
+  valdo needs: for the refine stage it sources the installation's setup script in a separate
+  `bash` and runs the program with that environment, in every command and batch job (see
+  [USER_GUIDE.md](USER_GUIDE.md#refinement-programs)).
 
 
 ## Part 1: your project
@@ -35,6 +39,8 @@ Where the data are, which models to use, where results go. Always look at these.
 | `models.apo` | `null` | path; or `null` | one apo model (PDB) for every dataset; also the fallback for datasets without their own model |  |
 | `models.per_dataset` | `null` | path or pattern; or `null` | one model per dataset: a pattern with {name}, or a folder/glob whose file names contain the dataset name |  |
 | `workdir` | `"valdo_run"` | path | all results go here (relative paths are relative to this file) |  |
+| `programs.phenix` | `null` | path (installation folder or its setup script); or `null` | PHENIX installation folder (or its phenix_env.sh) for phases.program: phenix; valdo sources its setup script itself, for every command and batch job. null = phenix.refine from PATH |  |
+| `programs.ccp4` | `null` | path (installation folder or its setup script); or `null` | CCP4 installation folder (or its bin/ccp4.setup-sh) for phases.program: dimple; null = dimple from PATH |  |
 
 ## Part 2: detected by `valdo init`
 
@@ -47,6 +53,7 @@ Check these; change them only if init got something wrong.
 | `phases.source` | `"input_mtz"` | `input_mtz` / `refine` / `existing` | where map phases come from: input_mtz (map coefficients already in the data files), refine (refine every dataset), existing (your refined MTZs) |  |
 | `phases.existing` | `null` | path or pattern; or `null` | source: existing -> your refined MTZs (pattern with {name}, folder or glob) |  |
 | `phases.program` | `null` | `phenix` / `dimple`; or `null` | source: refine -> refinement program: phenix or dimple |  |
+| `phases.twin_law` | `null` | twin law in hkl notation, e.g. `-h,-k,l`, or `auto`; or `null` | source: refine -> twin refinement with this twin law (hkl notation, in the reference dataset's indexing, e.g. -h,-k,l; 'valdo check' lists the possible ones), or auto (the only twin law this crystal form allows); null = no twin refinement |  |
 | `phases.columns.fwt` | `"2FOFCWT"` | text; or `null` | 2mFo-DFc amplitude column in the phase files (context maps) |  |
 | `phases.columns.phwt` | `"PH2FOFCWT"` | text; or `null` | 2mFo-DFc phase column (phases for the VALDO difference maps) | `add_phases_and_blobs.phase_2FOFC_col_in` |
 | `phases.columns.delfwt` | `"FOFCWT"` | text; or `null` | mFo-DFc amplitude column |  |
@@ -111,10 +118,17 @@ Besides types and ranges, loading stops with an error (saying what to change) wh
 - `advanced.train.include_errors` is false (upstream preprocess cannot run without sigma(F));
 - `advanced.reconstruct.repeats` > 1 with `ml_recon: true` (upstream crashes);
 - `advanced.reindex.cc_min_dif` <= 0 (upstream writes no files);
-- `advanced.blobs.extrapolate_factors` is empty.
+- `advanced.blobs.extrapolate_factors` is empty;
+- `phases.twin_law` is set but `phases.source` is not `refine`;
+- `advanced.refine.extra_args` asks for twin refinement (`xray_data.twin_law=...` or `twin_law=...`
+  for phenix, `--refmac-key twin` for dimple): set the law in `phases.twin_law` instead, also when
+  `phases.twin_law` is null (only then does valdo check the refined indexing and read the twin
+  fraction the way twinned data need).
 
 `valdo check` adds checks that need the data (for example: at least one validation dataset
-for the chosen `train_fraction`, and a warning below about 100 datasets).
+for the chosen `train_fraction`, a warning below about 100 datasets, and whether
+`phases.twin_law` is a twin law of the reference dataset's lattice; `auto` is resolved there to
+the only law that lattice allows, and refused when it allows none or several).
 
 ## Environment variables
 

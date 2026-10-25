@@ -17,6 +17,8 @@ to fix), 2 an internal error in valdo-easy (please report), 130 interrupted.
 import argparse
 import math
 import os
+import re
+import shutil
 import sys
 import time
 import traceback
@@ -41,6 +43,36 @@ class CliError(Exception):
 # Argument parser
 # ---------------------------------------------------------------------------
 
+class UsageError(Exception):
+    """A command-line usage error (unknown option, missing value): reported like every other error,
+    also as the JSON result with --json, instead of argparse's exit."""
+
+    def __init__(self, parser, message):
+        super().__init__(message)
+        self.parser, self.message = parser, message
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise UsageError(self, message)
+
+
+def join_option_values(argv, options=("--twin-law",)):
+    """'--twin-law -h,-k,l' -> '--twin-law=-h,-k,l': argparse takes a value that starts with '-' for an
+    option, so a twin law could otherwise only be given with '='."""
+    out, i = [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in options and i + 1 < len(argv) and argv[i + 1].startswith("-") and argv[i + 1] != "--" \
+                and not argv[i + 1].startswith("--"):
+            out.append(f"{arg}={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(arg)
+        i += 1
+    return out
+
+
 def _project_args(p):
     p.add_argument("project", nargs="?", default=None, help="project file (default: ./valdo.yaml)")
     p.add_argument("-c", "--config", dest="config", default=None, help="project file (same as PROJECT)")
@@ -52,7 +84,7 @@ def _json_arg(p):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="valdo", formatter_class=argparse.RawDescriptionHelpFormatter,
         description="VALDO: find ligand-bound datasets in a crystallographic fragment screen.",
         epilog="Start here:\n  valdo init /path/to/mtz_folder --apo apo.pdb\n  valdo check\n  valdo run\n\n"
@@ -73,6 +105,16 @@ def build_parser():
                    help="where phases come from (default: auto = the data files if they have map coefficients)")
     p.add_argument("--existing", help="your refined MTZs (pattern with {name}, folder or glob) for --phases existing")
     p.add_argument("--program", choices=["phenix", "dimple"], help="refinement program for --phases refine")
+    p.add_argument("--phenix", metavar="PATH",
+                   help="PHENIX installation folder (or its phenix_env.sh): written to programs.phenix, so every "
+                        "valdo command and batch job uses it (default: the PHENIX on PATH, if any)")
+    p.add_argument("--ccp4", metavar="PATH",
+                   help="CCP4 installation folder (or its bin/ccp4.setup-sh) for dimple: written to programs.ccp4 "
+                        "(default: the CCP4 on PATH, if any)")
+    p.add_argument("--twin-law", metavar="LAW",
+                   help="twin refinement with this twin law (hkl notation, e.g. --twin-law -h,-k,l), or 'auto' "
+                        "for the only twin law the reference lattice allows (needs --phases refine; "
+                        "'valdo check' lists the possible laws)")
     p.add_argument("--columns", help="amplitude and sigma columns, e.g. F,SIGF (default: detected)")
     p.add_argument("--reindex", choices=["auto", "true", "false"], default="auto",
                    help="reindex to a common setting (default: auto = if the lattice allows alternatives)")
@@ -121,8 +163,8 @@ def build_parser():
     p.add_argument("--gpu", action="store_true", help="request one GPU")
     p.add_argument("--env-setup", action="append", metavar="CMD",
                    help="shell line for the job's environment (repeatable). Default: activate the current one. "
-                        "Lines without 'activate' (e.g. CCP4's setup script) are added after that activation; "
-                        "lines with 'activate' replace it")
+                        "Lines without 'activate' are added after that activation; lines with 'activate' replace "
+                        "it. PHENIX/CCP4 need no line here when programs.phenix/programs.ccp4 is set in valdo.yaml")
     p.add_argument("--log-dir", help="folder for the job log (default: <workdir>/logs)")
     p.add_argument("-o", "--output", help="write the script here instead of printing it")
     _json_arg(p)
@@ -290,6 +332,7 @@ def cmd_init(args, console):
     if os.path.exists(out_path) and not args.force:
         raise CliError("project_exists", f"{out_path} already exists.",
                        fix="Use --force to overwrite it, or -o to write another file.")
+    previous = _previous_settings(out_path) if os.path.exists(out_path) else {}
     tty = sys.stdin.isatty() and not args.json
     data = args.data or (_prompt("Folder (or quoted glob) with your MTZ files") if tty else None)
     if not data:
@@ -414,6 +457,46 @@ def cmd_init(args, console):
     project["phases"]["rfree"] = scan.detect_rfree_column(phase_headers) if phase_headers else None
     decisions.append({"setting": "phases.source", "value": source, "why": why})
 
+    # refinement program installations (programs.phenix / programs.ccp4) and the twin law
+    from valdo.easy import programs
+    comments, init_warnings = {}, []
+    origins = {}
+    for family, given in (("phenix", args.phenix), ("ccp4", args.ccp4)):
+        if given:
+            try:
+                text, _ = programs.clean_setting(given)
+            except ValueError as exc:
+                raise CliError("bad_options", f"--{family} {given}: {exc}.",
+                               fix=f"Give the installation folder, e.g. --{family} {programs.example(family)}.")
+            project["programs"][family] = scan.expand_path(text, cwd)
+            origins[family] = f"given with --{family}"
+            used = source == "refine" and programs.FAMILY[args.program] == family
+            if not used:
+                init_warnings.append(f"--{family} is written to programs.{family} but not used: "
+                                     + (f"phases.source is {source}" if source != "refine" else
+                                        f"--program is {args.program}"))
+        elif (previous.get("programs") or {}).get(family):
+            project["programs"][family] = previous["programs"][family]   # as written there ($VAR, ~ kept)
+            origins[family] = "kept from the valdo.yaml this replaces"
+    if source == "refine":
+        _init_program(project, args.program, origins.get(programs.FAMILY[args.program]), base, decisions,
+                      comments, init_warnings)
+    if previous.get("twin_law") and not args.twin_law and source == "refine":
+        init_warnings.append(f"the valdo.yaml this replaces had phases.twin_law: {previous['twin_law']}; init does "
+                             f"not keep it: give --twin-law {previous['twin_law']} again, or set it in valdo.yaml")
+    if args.twin_law:
+        from valdo.easy.twin import TwinLawError, normalise_setting
+        if source != "refine":
+            raise CliError("bad_options", f"--twin-law needs --phases refine (twin refinement of every dataset); "
+                                          f"phases.source would be {source}.",
+                           fix="Add --phases refine --program phenix|dimple, or leave out --twin-law.")
+        try:
+            project["phases"]["twin_law"] = normalise_setting(args.twin_law)
+        except TwinLawError as exc:
+            raise CliError("twin_law_invalid", f"--twin-law {args.twin_law}: {exc}.",
+                           fix="Write the law in hkl notation, e.g. --twin-law -h,-k,l, or use --twin-law auto "
+                               "('valdo check' lists the possible laws).")
+
     # focal residue, validation, compute
     if args.focal_seqid is not None:
         project["focal_residue"]["seqid"] = args.focal_seqid
@@ -452,6 +535,9 @@ def cmd_init(args, console):
     if inputs.reindex:
         decisions.append({"setting": "reindex", "value": f"{args.reindex} -> {'on' if inputs.reindex['enabled'] else 'off'}",
                           "why": inputs.reindex["why"]})
+    if source == "refine":
+        _init_twin_law(validated, inputs, decisions, comments, init_warnings)
+        project["phases"]["twin_law"] = validated["phases"]["twin_law"]
     decisions.append({"setting": "compute.ncpu", "value": project["compute"]["ncpu"],
                       "why": f"{'given with --ncpu' if args.ncpu else f'{available} CPU(s) available here (max 16)'}; "
                              "use your batch job's slot count"})
@@ -469,14 +555,14 @@ def cmd_init(args, console):
         header.append(f"high-resolution limits {s['d_min_range'][0]:.2f}-{s['d_min_range'][1]:.2f} A")
     for d in decisions:
         header.append(f"{d['setting']}: {d['value']}  ({d['why']})")
-    write_project(_plain(project), out_path, header_lines=header)
+    write_project(_plain(project), out_path, header_lines=header, comments=comments)
     try:
         load_project(out_path)
     except ProjectError as exc:  # pragma: no cover - write_project checks the round trip
         raise CliError("internal", "valdo init wrote a project file it cannot read back.", details=exc.messages,
                        exit_code=EXIT_INTERNAL)
 
-    warnings = [f["title"] + ": " + f["what"] for f in inputs.findings if f["level"] != "info"]
+    warnings = [f["title"] + ": " + f["what"] for f in inputs.findings if f["level"] != "info"] + init_warnings
     pattern = check.model_pattern_finding(validated, inputs)
     if pattern:   # --models matched nothing: say so now, not only in 'valdo check'
         warnings.append(f"{pattern['title']}: {pattern['what']} ({'; '.join(pattern['items'])})")
@@ -499,6 +585,103 @@ def cmd_init(args, console):
 
 def _plain(project):
     return {k: v for k, v in project.items() if not k.startswith("_")}
+
+
+def _previous_settings(path):
+    """programs.* and phases.twin_law of the project file that 'valdo init --force' replaces ({} if it
+    cannot be read)."""
+    try:
+        import yaml
+        with open(path) as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    progs = data.get("programs") if isinstance(data.get("programs"), dict) else {}
+    phases = data.get("phases") if isinstance(data.get("phases"), dict) else {}
+    return {"programs": {k: str(v) for k, v in progs.items() if k in ("phenix", "ccp4") and v},
+            "twin_law": phases.get("twin_law") or None}
+
+
+def _init_program(project, program, origin, base, decisions, comments, warnings):
+    """programs.<family> for `valdo init`: check the installation given with --phenix/--ccp4 (or kept
+    from the project file being replaced), or find the one on PATH."""
+    from valdo.easy import programs, scan
+    family = programs.FAMILY[program]
+    setting = programs.setting_name(program)
+    if origin:
+        value = project["programs"][family]
+        info = programs.resolve(program, scan.expand_path(value, base))
+        if info["error"]:
+            if origin.startswith("given"):
+                raise CliError(info["error"]["code"], f"--{family} {value}: {info['error']['what']}.",
+                               fix=info["error"]["fix"])
+            warnings.append(f"{setting} ({value}, {origin}): {info['error']['what']}; fix it in valdo.yaml or run "
+                            f"init with --{family} PATH")
+            decisions.append({"setting": setting, "value": value, "why": f"{origin}; not usable (see the warning)"})
+            return
+        decisions.append({"setting": setting, "value": value,
+                          "why": f"{origin}: {programs.short(info)}; valdo sets it up for every command and batch job"})
+        return
+    root, note = programs.installation_on_path(program)
+    if root:
+        project["programs"][family] = root
+        comments[setting] = "found on PATH by valdo init"
+        decisions.append({"setting": setting, "value": root,
+                          "why": f"{note}; valdo sets it up for every command and batch job"})
+        return
+    decisions.append({"setting": setting, "value": "null", "why": note})
+    if shutil.which(programs.EXECUTABLES[program]) is None:
+        warnings.append(f"{programs.EXECUTABLES[program]} is not on PATH here: set {setting} in valdo.yaml to your "
+                        f"{programs.LABELS[family]} installation (or run init with --{family} PATH) before "
+                        "'valdo run'")
+
+
+def _init_twin_fix(res):
+    """How to fix a --twin-law that check_law refused, in init's terms."""
+    options = ", ".join(res["possible"])
+    if res["code"] == "twin_law_none_possible" or not res["possible"]:
+        return ("Leave out --twin-law: crystals of this form cannot be twinned by (pseudo-)merohedry. If you "
+                "expected twinning, check the space group and cell of your data.")
+    if res["code"] == "twin_law_ambiguous":
+        return (f"Give the law that phenix.xtriage or your processing program reports: --twin-law LAW (one of "
+                f"{options}).")
+    return f"Use a twin law of this lattice: --twin-law {res['possible'][0]}" + (
+        f" (possible here: {options})." if len(res["possible"]) > 1 else ".")
+
+
+def _init_twin_law(project, inputs, decisions, comments, warnings):
+    """The possible twin laws of the reference lattice (comment in valdo.yaml); check --twin-law
+    (``auto`` is written as auto; the decision shows the law it stands for)."""
+    from valdo.easy import check, twin
+    law = project["phases"].get("twin_law")
+    lattice = check.reference_lattice(inputs)
+    possible, reason = None, "there is no usable reference dataset"
+    if lattice:
+        cell, sg = lattice
+        try:
+            possible = [p["law"] for p in twin.possible_laws(cell, sg)]
+        except Exception as exc:  # gemmi missing or an exotic space group
+            reason = f"the twin laws of {sg} could not be determined ({exc})"
+    if possible is None:
+        if law:
+            warnings.append(f"--twin-law {law} could not be checked: {reason} ('valdo check' says more)")
+        return
+    comments["phases.twin_law"] = (f"possible for {sg} with this cell: {', '.join(possible)}" if possible else
+                                   f"{sg} with this cell cannot be twinned")
+    if law:
+        res = twin.check_law(law, cell, sg)
+        if not res["ok"]:
+            raise CliError(res["code"], f"--twin-law {law}: {res['message']}.", fix=_init_twin_fix(res))
+        auto = twin.is_auto(law)
+        project["phases"]["twin_law"] = twin.AUTO if auto else res["law"]
+        decisions.append({"setting": "phases.twin_law", "value": f"auto -> {res['law']}" if auto else res["law"],
+                          "why": f"given with --twin-law: {res['message']}" + (f"; {res['note']}" if res.get("note") else "")})
+    elif possible:
+        decisions.append({"setting": "phases.twin_law", "value": "null",
+                          "why": f"no twin refinement; {sg} with this cell allows the twin law(s) {', '.join(possible)}: "
+                                 "set phases.twin_law if your crystals are twinned"})
 
 
 def cmd_check(args, console):
@@ -633,6 +816,22 @@ def cmd_status(args, console):
         console.say(f"  {st['number']:>2}  {st['stage']:<21} {status:<12} {secs:>8}  {counts}")
         if st["status"] == "failed" and st.get("error"):
             console.say(f"      {st['error'].get('what')}  (log: {st.get('log')})")
+    warnings = []
+    refine_st = next((st for st in s["stages"] if st["stage"] == "refine"), None)
+    if refine_st and refine_st["applicable"] and s.get("refine_program"):
+        from valdo.easy import programs
+        recorded = s["refine_program"]
+        console.say(f"Refinement: {programs.describe(recorded)}")
+        try:   # no version probe: status stays quick (the setup script gives PHENIX's version)
+            now = programs.public(programs.for_project(project, probe_version=False))
+        except Exception:
+            now = None
+        if now and not now.get("error") and programs.version_differs(recorded, now):
+            text = (f"the refinement program version changed since the refine stage ran (refined with "
+                    f"{programs.short(recorded)}, set up now: {programs.short(now)}); datasets already refined are "
+                    "not refined again ('valdo check' says how to refine them all with one version)")
+            warnings.append(text)
+            console.say(f"note: {text}")
     d = s["datasets"]
     by_stage = ", ".join(f"{k} {v}" for k, v in d["dropped_by_stage"].items())
     console.say(f"Datasets: {d['total']} total, {d['ok']} ok, {d['dropped']} dropped" + (f" ({by_stage})" if by_stage else ""))
@@ -646,7 +845,7 @@ def cmd_status(args, console):
                     f"{'ok' if lr.get('ok') else ('failed' if lr.get('ok') is False else 'not finished')}")
     todo = [st for st in s["stages"] if st["applicable"] and (st["stale"] or st["status"] != "done")]
     html = os.path.join(s["workdir"], "report", "report.html")
-    result = {"ok": True, "project_file": project["_path"], **s}
+    result = {"ok": True, "project_file": project["_path"], **s, "warnings": warnings}
     if s["lock"] and not s["lock"].get("stale"):
         # a run is active: starting another one would only stop with 'locked'
         nxt = ["valdo status"]
@@ -737,9 +936,11 @@ def _job_env_setup(extra):
 
 # Measured on Wynton CPU nodes (16 cores, phases from the data files): 300 PTP1B datasets in 5 min,
 # 1,680 in 51 min, i.e. about 30 core-seconds per dataset. dimple took about 1 core-minute per
-# dataset; phenix.refine takes several.
+# dataset; phenix.refine with the packaged .eff a median 6.4 core-minutes (2.2.1) and 11.3 (1.21.2)
+# per PTP1B dataset in batch runs 16 at a time (3.8-12 min). The jobscript estimate multiplies the
+# per-dataset figure by 3, which covers both versions.
 JOB_CORE_SECONDS_PER_DATASET = 30
-JOB_REFINE_CORE_SECONDS = {"dimple": 60, "phenix": 300}
+JOB_REFINE_CORE_SECONDS = {"dimple": 60, "phenix": 360}
 
 
 def suggest_hours(n_datasets, slots, phases_source=None, program=None):
@@ -778,11 +979,14 @@ def cmd_jobscript(args, console):
             hours, hours_why = 24.0, "default (no data to estimate from); change it with --hours"
     scheduler = args.scheduler or _detect_scheduler()
     env_setup = _job_env_setup(args.env_setup)
+    notes, warnings = _job_program_notes(project, args.env_setup)
     log_dir = os.path.abspath(args.log_dir) if args.log_dir else (os.path.join(workdir, "logs") if workdir else None)
     if args.output and log_dir:
         os.makedirs(log_dir, exist_ok=True)    # the scheduler writes the job log there
     text = jobscript.render(scheduler, path, slots=slots, hours=hours, mem_gb=args.mem_gb, gpu=args.gpu,
-                            env_setup=env_setup, log_dir=log_dir)
+                            env_setup=env_setup, log_dir=log_dir, notes=notes)
+    for warning in warnings:
+        console.say(f"warning: {warning}")
     out = None
     if args.output:
         out = os.path.abspath(args.output)
@@ -801,7 +1005,60 @@ def cmd_jobscript(args, console):
             console.out.flush()
         nxt = ["valdo jobscript -o run_valdo.sh"]
     return {"ok": True, "scheduler": scheduler, "path": out, "script": text, "hours": hours, "hours_why": hours_why,
-            "slots": slots, "next": nxt}
+            "slots": slots, "notes": notes, "warnings": warnings, "next": nxt}
+
+
+def _job_program_notes(project, env_setup):
+    """Comment lines for the job script about the refinement program, and warnings (refine stage only)."""
+    if not project or project["phases"]["source"] != "refine" or not project["phases"]["program"]:
+        return [], []
+    from valdo.easy import programs
+    program = project["phases"]["program"]
+    family = programs.FAMILY[program]
+    setting = programs.setting_name(program)
+    exe = programs.EXECUTABLES[program]
+    label = programs.LABELS[family]
+    configured = (project.get("programs") or {}).get(family)
+    refined = _refine_done(project)
+    stop = ("if the refine stage has to run again, it would stop" if refined else "the refine stage would stop")
+    if configured:
+        notes = [f"Refinement program: {setting} in valdo.yaml:", f"  {configured}",
+                 f"valdo sets {label} up itself for the refine stage (it sources the installation's setup "
+                 "script), so no setup line is needed here."]
+        warnings = []
+        place = programs.find_installation(family, configured)
+        if place["problem"]:
+            warnings.append(f"{setting} ({configured}): {place['problem']}; {stop}. 'valdo check' says how to fix it.")
+        raw = (project.get("_unexpanded") or {}).get(setting)
+        if raw:
+            names = sorted(set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", raw)) - {"HOME", "USER", "LOGNAME"})
+            if names:
+                warnings.append(f"{setting} is written with the variable(s) {', '.join('$' + n for n in names)} "
+                                f"({raw}); the batch job expands them in its own environment, which must set them "
+                                f"too (here: {configured}). Simplest: write the folder itself in valdo.yaml.")
+        return notes, warnings
+    lines = " ".join(env_setup or []).lower()
+    if family in lines or "phenix" in lines or "ccp4" in lines:
+        return [f"Refinement program: {exe} from PATH, set up by the environment lines above."], []
+    on_path = shutil.which(exe)
+    if on_path:
+        return ([f"Refinement program: {exe} from PATH (it was at {on_path} when this script was written)."],
+                [f"{setting} is not set in valdo.yaml, so the refine stage uses {exe} from the job's PATH, which "
+                 f"may differ from this shell's. Simplest: set {setting} in valdo.yaml to your {label} "
+                 "installation folder (valdo then sets it up itself)."])
+    return [], [f"phases.source is refine, but {setting} is not set in valdo.yaml and {exe} is not on PATH here: "
+                f"{stop}. Set {setting}: {programs.example(family)} (your {label} installation folder) in "
+                "valdo.yaml (simplest), or add its setup line with --env-setup."]
+
+
+def _refine_done(project):
+    """True if the refine stage finished in this project's work directory."""
+    from valdo.easy.runner import load_state
+    try:
+        state = load_state(project["workdir"]) or {}
+        return ((state.get("stages") or {}).get("refine") or {}).get("status") == "done"
+    except Exception:
+        return False
 
 
 COMMANDS = {"init": cmd_init, "check": cmd_check, "run": cmd_run, "status": cmd_status, "report": cmd_report,
@@ -814,11 +1071,13 @@ COMMANDS = {"init": cmd_init, "check": cmd_check, "run": cmd_run, "status": cmd_
 
 def main(argv=None):
     from valdo.easy.runner import Console, Interrupted, RunError
-    argv = sys.argv[1:] if argv is None else list(argv)
+    argv = join_option_values(sys.argv[1:] if argv is None else list(argv))
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-    except SystemExit as exc:  # argparse: --help (0) or a usage error (2 -> 1)
+    except UsageError as exc:
+        return _usage_error(exc, argv)
+    except SystemExit as exc:  # argparse: --help (0)
         return 0 if exc.code in (0, None) else EXIT_PROBLEM
     json_mode = bool(getattr(args, "json", False))
     console = Console(json_mode=json_mode)
@@ -872,6 +1131,25 @@ def main(argv=None):
             console.event(**final)
         console.close()
     return exit_code
+
+
+def _usage_error(exc, argv):
+    """A usage error: argparse's usage line and message, or with --json the usual JSON error result."""
+    from valdo.easy.runner import Console
+    command = next((a for a in argv if a in COMMANDS), "help")
+    helper = f"{exc.parser.prog} --help"
+    if "--json" not in argv:
+        exc.parser.print_usage(sys.stderr)
+        sys.stderr.write(f"{exc.parser.prog}: error: {exc.message}\nSee '{helper}'.\n")
+        return EXIT_PROBLEM
+    console = Console(json_mode=True)
+    err = {"code": "bad_options", "message": f"{exc.parser.prog}: {exc.message}.", "what": exc.message,
+           "cause": "The command line has an unknown option or a missing value.", "fix": f"See '{helper}'.",
+           "log": None, "details": []}
+    _say_error(console, err)
+    console.event(schema=SCHEMA_ID, command=command, ok=False, error=err, next=[])
+    console.close()
+    return EXIT_PROBLEM
 
 
 def _next_after_error(command, code):

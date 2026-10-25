@@ -55,6 +55,7 @@ class Inputs:
         self.phase_problems = []
         self.bound = {}            # name -> path
         self.bound_problems = []
+        self.twin = None           # twin laws of the reference lattice (phases.source: refine)
         self.findings = []         # input findings collected while inspecting
 
     def ok_rows(self):
@@ -309,12 +310,15 @@ def environment(project, need_refine=False):
            "packages": package_versions(), "cpus": ncpu, "cpus_source": source,
            "gpu": gpu_info(), "login_node": login, "batch_job": in_batch_job(),
            "free_disk_bytes": free_space(project["workdir"]), "programs": None}
+    env["refine_program"] = None
     if need_refine:
         try:
             refine = importlib.import_module("valdo.easy.refine")
             env["programs"] = refine.detect_programs()
         except Exception as exc:
             env["programs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        from valdo.easy import programs
+        env["refine_program"] = programs.public(programs.for_project(project))
     return env
 
 
@@ -336,6 +340,7 @@ def run_checks(project, inputs=None, deep=False, env=None):
     out += _check_environment(project, env)
     if inp.files:
         out += _check_inputs(project, inp)
+        out += _check_twin(project, inp)
         out += _check_settings(project, inp, env)
         if deep:
             out += deep_check(project, inp)
@@ -360,6 +365,7 @@ def inputs_summary(project, inp):
         "n_fallback_model": sum(1 for r in ok if "fallback_model" in r["flags"]),
         "n_bound_models": sum(1 for r in ok if r["bound_model"]),
         "reference": inp.reference, "reindex": inp.reindex, "column_rename": inp.rename,
+        "twin": inp.twin,
     }
 
 
@@ -396,16 +402,237 @@ def _check_environment(project, env):
                            "A run writes several copies of the data (about 4x the MTZ size plus the VAE arrays).",
                            "Move 'workdir' to a bigger file system (e.g. cluster scratch)."))
     if project["phases"]["source"] == "refine":
-        prog = project["phases"]["program"]
-        progs = env.get("programs") or {}
-        if "error" in progs:
-            out.append(finding("error", "refine_unavailable", "The refinement module could not be loaded",
-                               f"valdo.easy.refine: {progs['error']}.", "", "Report this as a bug."))
-        elif not progs.get(prog):
-            out.append(finding("error", "refine_program_missing", f"{prog} is not available",
-                               f"phases.source is 'refine' with program '{prog}', but it is not on PATH.",
-                               "Every dataset must be refined to get phases.",
-                               "Set up PHENIX/CCP4 in this shell or job script (e.g. source .../ccp4.setup-sh) and rerun 'valdo check'."))
+        out += _check_refine_program(project, env)
+    out += _check_unused_programs(project)
+    return out
+
+
+def _check_refine_program(project, env):
+    from valdo.easy import programs
+    out = []
+    prog = project["phases"]["program"]
+    progs = env.get("programs") or {}
+    info = env.get("refine_program") or {}
+    setting = programs.setting_name(prog)
+    label = programs.LABELS[programs.FAMILY[prog]]
+    error = info.get("error") or {}
+    if "error" in progs:
+        out.append(finding("error", "refine_unavailable", "The refinement module could not be loaded",
+                           f"valdo.easy.refine: {progs['error']}.", "", "Report this as a bug."))
+    elif error.get("code") == "refine_program_missing":
+        out.append(finding("error", "refine_program_missing", f"{prog} is not available",
+                           f"phases.source is 'refine' with program '{prog}', but {programs.EXECUTABLES[prog]} is not "
+                           f"on PATH and {setting} is not set in valdo.yaml.",
+                           "Every dataset must be refined to get phases.",
+                           f"Set {setting} in valdo.yaml to your {label} installation folder (e.g. {setting}: "
+                           f"{programs.example(programs.FAMILY[prog])}); valdo then sets it up itself for every command "
+                           "and batch job. Then rerun 'valdo check'."))
+    elif error.get("code") == "program_not_found":
+        out.append(finding("error", "program_not_found", f"No {label} installation where {setting} points",
+                           error["what"] + ".", "Every dataset must be refined to get phases.", error["fix"]))
+    elif error:
+        out.append(finding("error", "program_setup_failed", f"{label} could not be set up from {setting}",
+                           error["what"] + ".", "Every dataset must be refined to get phases.", error["fix"]))
+    elif info:
+        notes = list(info.get("notes") or [])
+        if info.get("source") == "PATH" and info.get("exe"):
+            # a batch job does not have this shell's PATH: say which folder to write into valdo.yaml
+            place = programs.find_installation(programs.FAMILY[prog], info["exe"])
+            if place["script"]:
+                notes.append(f"a batch job does not have this shell's PATH: set {setting}: {place['root']} in "
+                             "valdo.yaml, and valdo sets it up itself in every command and batch job")
+        note_text = "; ".join(notes)
+        out.append(finding("info", "refine_program", "Refinement program",
+                           programs.describe(info) + "." + (f" Note: {note_text}." if note_text else "")))
+        out += _check_program_versions(project, info)
+    return out
+
+
+def _check_program_versions(project, info):
+    """program_changed: the versions that made the existing refinements differ from the one set up now
+    (only the version counts; another folder with the same version is no change)."""
+    from valdo.easy import programs
+    recorded = _recorded_program(project)
+    if not recorded or recorded.get("program") != info.get("program"):
+        return []    # never refined, or another program: the per-dataset fingerprints refine everything again
+    versions = recorded_versions(project["workdir"]) or ({recorded["version"]: None} if recorded.get("version") else {})
+    changed = [v for v in versions if programs.version_differs({"program": info["program"], "version": v}, info)]
+    mixed = any(programs.version_differs({"program": info["program"], "version": a},
+                                         {"program": info["program"], "version": b})
+                for i, a in enumerate(versions) for b in list(versions)[i + 1:])
+    if not changed and not mixed:
+        return []
+    made = ", ".join(f"{v} ({n} refined variant{'s' if n != 1 else ''})" if n is not None else v
+                     for v, n in versions.items())
+    runs = os.path.join(project["workdir"], "04_refine", "runs")
+    return [finding(
+        "warning", "program_changed",
+        "The existing refinements were made by different program versions" if mixed else
+        "The refinement program version differs from the one that made the existing refinements",
+        f"Existing refinements: {made}; set up now: {programs.short(info)}.",
+        "Datasets that were already refined are not refined again, so the results mix program versions "
+        "(R-free and the phases can differ slightly between versions).",
+        f"To refine every dataset with the program set up now, delete {runs} and run 'valdo run --from refine'. "
+        "To keep the existing refinements, nothing needs to be done.")]
+
+
+def recorded_versions(workdir):
+    """{program_version: number of refined variants} from 04_refine/refine_summary.csv (status ok;
+    variants whose version was not recorded are left out); {} when there is none."""
+    import csv
+    counts = {}
+    try:
+        with open(os.path.join(workdir, "04_refine", "refine_summary.csv"), newline="") as handle:
+            for row in csv.DictReader(handle):
+                version = (row.get("program_version") or "").strip()
+                if row.get("status") == "ok" and version:
+                    counts[version] = counts.get(version, 0) + 1
+    except (OSError, csv.Error):
+        return {}
+    return counts
+
+
+def _recorded_program(project):
+    """The refinement program recorded by the last successful refine stage (valdo_state.json), if any."""
+    import json
+    try:
+        with open(os.path.join(project["workdir"], "valdo_state.json")) as handle:
+            state = json.load(handle)
+        st = state["stages"]["refine"]
+        return st.get("outputs", {}).get("program") if st.get("status") == "done" else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _check_unused_programs(project):
+    from valdo.easy import programs
+    out = []
+    used = (programs.FAMILY.get(project["phases"]["program"])
+            if project["phases"]["source"] == "refine" and project["phases"]["program"] else None)
+    for family, path in sorted((project.get("programs") or {}).items()):
+        if path and family != used:
+            why = ("phases.source is not refine" if project["phases"]["source"] != "refine" else
+                   f"phases.program is {project['phases']['program']}")
+            out.append(finding("info", "programs_unused", f"programs.{family} is set but not used",
+                               f"programs.{family} ({path}) is only used when the refine stage runs "
+                               f"{'phenix.refine' if family == 'phenix' else 'dimple'}; {why}."))
+    return out
+
+
+def reference_lattice(inp):
+    """(cell, space group name) of the reference dataset, from its MTZ header; None when there is no
+    usable reference (yet)."""
+    if inp is None or not getattr(inp, "reference", None):
+        return None
+    ref = next((h for n, h in zip(inp.names, inp.headers) if n == inp.reference["name"]), None)
+    if not ref or not ref.get("cell") or not ref.get("sg_name"):
+        return None
+    return ref["cell"], ref["sg_name"]
+
+
+def resolve_twin_law(project, inp):
+    """phases.twin_law as the refine stage uses it: None (no twin refinement), the law to refine
+    (canonical text; ``auto`` resolved from the reference lattice, a law written with an inversion
+    replaced by the same law without it), or the setting unchanged when the reference lattice does
+    not decide it ('valdo check' says why, and refine refuses an unresolved ``auto``)."""
+    from valdo.easy import twin
+    law = project["phases"].get("twin_law")
+    if not law:
+        return None
+    lattice = reference_lattice(inp)
+    if lattice is None:
+        return law
+    try:
+        res = twin.check_law(law, *lattice)
+    except Exception:  # gemmi missing or an exotic space group
+        return law
+    return res["law"] if res["ok"] else law
+
+
+def _twin_unchecked(law, auto, reason):
+    """twin_law_unchecked: the reference lattice could not be analysed."""
+    if auto:
+        return finding("error", "twin_law_unchecked", "valdo cannot work out the twin law (phases.twin_law: auto)",
+                       f"phases.twin_law is auto, but {reason}.",
+                       "auto takes the twin law from the reference dataset's lattice; without it the refine "
+                       "stage cannot run.",
+                       "Set phases.twin_law to the law itself (as phenix.xtriage or your processing program "
+                       "reports it, e.g. -h,-k,l), or set it to null.")
+    return finding("warning", "twin_law_unchecked", "The twin law could not be checked",
+                   f"phases.twin_law is {law}, but {reason}, so valdo could not check that it is a twin law of "
+                   "these crystals.",
+                   "A law that does not fit the lattice makes refinement fail, or refines a twinning the "
+                   "crystals do not have.",
+                   "Compare the law with what phenix.xtriage or your processing program reports.")
+
+
+def _check_twin(project, inp):
+    """Twin laws of the reference lattice, and whether phases.twin_law is one of them."""
+    from valdo.easy import twin
+    out = []
+    if project["phases"]["source"] != "refine" or not inp.reference:
+        return out      # without a usable reference other errors stop the run already
+    law = project["phases"].get("twin_law")
+    auto = twin.is_auto(law)
+    lattice = reference_lattice(inp)
+    if lattice is None:
+        if law:
+            out.append(_twin_unchecked(law, auto, "the reference dataset's MTZ header has no cell or space group"))
+        return out
+    cell, sg = lattice
+    try:
+        possible = [p["law"] for p in twin.possible_laws(cell, sg)]
+    except Exception as exc:  # gemmi missing or an exotic space group
+        inp.twin = {"space_group": sg, "possible": None, "configured": law, "ok": None, "law": None,
+                    "note": str(exc)}
+        if law:
+            out.append(_twin_unchecked(law, auto, f"the twin laws of {sg} could not be determined ({exc})"))
+        return out
+    inp.twin = {"space_group": sg, "possible": possible, "configured": law, "ok": None, "law": None}
+    program = project["phases"]["program"]
+    if not law:
+        if possible:
+            several = len(possible) > 1
+            out.append(finding(
+                "info", "twin_law", "Twin refinement is off",
+                f"{sg} with the reference cell can be twinned (twin law{'s' if several else ''} "
+                f"{', '.join(possible)}); phases.twin_law is null, so every dataset is refined without a twin law.",
+                "If the crystals are twinned, the model is then refined against data that mix two orientations of "
+                "the crystal, and a refined MTZ can fit two indexings (with dimple, that dataset is then dropped "
+                "at refine).",
+                (f"If your crystals are twinned (phenix.xtriage or your processing program says so), set "
+                 f"phases.twin_law: \"{possible[0]}\" in valdo.yaml (or auto, the only law of this lattice)."
+                 if not several else
+                 f"If your crystals are twinned, set phases.twin_law in valdo.yaml to the law phenix.xtriage or "
+                 f"your processing program reports; this lattice allows {len(possible)}: {', '.join(possible)}.")))
+        return out
+    res = twin.check_law(law, cell, sg)
+    inp.twin.update(ok=res["ok"], law=res["law"])
+    why = "The refinement program would refine a twin law that does not exist in these crystals."
+    if res["code"] == "twin_law_ambiguous":
+        out.append(finding("error", "twin_law_ambiguous", "phases.twin_law is auto, but this lattice has several twin laws",
+                           f"phases.twin_law: {res['message']}.",
+                           "Only one law is refined, and valdo cannot tell which one your crystals have.",
+                           res["fix"].rstrip(".") + f" (one of {', '.join(res['possible'])})."))
+    elif res["code"] == "twin_law_is_symmetry":
+        out.append(finding("error", "twin_law_is_symmetry", "The twin law is a symmetry operation of the crystal",
+                           f"phases.twin_law: {res['message']}.", why, res["fix"]))
+    elif res["code"] == "twin_law_none_possible":
+        out.append(finding("error", "twin_law_none_possible", "This crystal form cannot be twinned",
+                           (f"phases.twin_law: {res['message']}." if auto else
+                            f"phases.twin_law is {law}, but {res['message']}."),
+                           "There is no twin law to refine." if auto else why, res["fix"]))
+    elif not res["ok"]:
+        out.append(finding("error", "twin_law_invalid", "The twin law does not fit this lattice",
+                           f"phases.twin_law: {res['message']}.", why, res["fix"]))
+    else:
+        how = ("phenix.refine refines this law's twin fraction for every dataset" if program == "phenix" else
+               "dimple runs REFMAC with twin refinement: REFMAC finds the twin laws itself, keeps those with a twin "
+               "fraction of at least 0.07 and refines them; valdo compares them with this law")
+        note = f" ({res['note']})" if res.get("note") else ""
+        out.append(finding("info", "twin_law", "Twin refinement is on",
+                           f"Twin refinement with {res['message']}{note}: {how}. The law and twin fraction of every "
+                           "refined dataset go to 04_refine/refine_summary.csv and datasets.csv."))
     return out
 
 

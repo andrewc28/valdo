@@ -184,6 +184,6 @@ def test_suggested_wall_time():
     assert suggest_hours(300, 16, "input_mtz") == 1.0           # 3*300*30/16 + 900 s = 2588 s
     assert suggest_hours(24, 16, "input_mtz") == 0.5
     assert suggest_hours(300, 16, "refine", "dimple") == 2.0    # + 60 core-s per dataset
-    assert suggest_hours(300, 16, "refine", "phenix") == 5.5    # + 300 core-s per dataset
+    assert suggest_hours(300, 16, "refine", "phenix") == 6.5    # + 360 core-s per dataset
     assert suggest_hours(2000, 4, "input_mtz") == 13.0
     assert suggest_hours(2000, 16, "input_mtz") > suggest_hours(2000, 32, "input_mtz")

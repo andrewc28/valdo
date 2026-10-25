@@ -868,5 +868,7 @@ def status_summary(project, inputs=None):
     if lock is not None:
         stale, why = Lock(workdir)._stale(lock)
         lock = dict(lock, stale=stale, stale_reason=why)
+    refine_st = (state.get("stages") or {}).get("refine") or {}
+    program = (refine_st.get("outputs") or {}).get("program") if refine_st.get("status") == "done" else None
     return {"workdir": workdir, "has_state": bool(state), "stages": stages, "datasets": datasets, "lock": lock,
-            "last_run": state.get("last_run"), "inputs": state.get("inputs")}
+            "last_run": state.get("last_run"), "inputs": state.get("inputs"), "refine_program": program}

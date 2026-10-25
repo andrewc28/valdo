@@ -38,9 +38,20 @@ General rules:
 | `existing_unmatched` | No refined MTZ matched a dataset name. | Use a pattern with `{name}`, e.g. `'/refined/{name}/final.mtz'`. |
 | `existing_no_phases` | The refined MTZs have no recognised map coefficients. | Set `phases.columns` (fwt, phwt, delfwt, phdelwt) in `valdo.yaml` by hand. |
 | `project_invalid` | The settings are inconsistent (details listed). | Correct them as listed. |
+| `program_not_found` | `--phenix`/`--ccp4` names no PHENIX or CCP4 installation (the path does not exist, or there is no `phenix_env.sh` / `bin/ccp4.setup-sh` in or near it). | Give the installation folder, e.g. `--ccp4 /opt/ccp4-9` or `--phenix /opt/phenix-2.2-6143` (the folder with `phenix_env.sh`). |
+| `program_setup_failed` | The installation's setup script did not work when sourced in `bash`, or the program (`dimple`, `phenix.refine`) is not on PATH after it. | Check the installation: `bash -c 'source /opt/ccp4-9/bin/ccp4.setup-sh && which dimple'`. |
+| `twin_law_invalid` | `--twin-law` cannot be read (write it in hkl notation: `--twin-law -h,-k,l`), or it is not a symmetry of the reference dataset's lattice. | Use one of the laws the message lists. |
+| `twin_law_is_symmetry` | The `--twin-law` is a symmetry operation of the crystal: it maps the crystal onto itself, so it describes no twinning. | Use a twin law of this crystal form (listed in the message). |
+| `twin_law_none_possible` | The reference dataset's space group and cell allow no (pseudo-)merohedral twinning, so no twin law applies (also for `--twin-law auto`). | Leave out `--twin-law`; check the space group if you expected twinning. |
+| `twin_law_ambiguous` | `--twin-law auto`, but the reference lattice allows several twin laws (e.g. P 3, P 31, pseudo-cubic cells), so valdo cannot tell which one your crystals have. | Give the law that phenix.xtriage or your processing program reports: `--twin-law LAW` (the message lists the possible ones). |
+| `bad_options` | `--twin-law` without `--phases refine` (twin refinement is part of refining every dataset); `--phenix`/`--ccp4` given a shell command (`export ...`, `module load ...`) instead of a path; or an unknown option or missing value (also reported as JSON with `--json`). | Add `--phases refine --program dimple` (or `phenix`), or leave out `--twin-law`; give the installation folder; see `valdo init --help`. |
 
 `valdo init` also warns (it still writes the project) when `--models` matches none of the
-datasets; `valdo check` then reports it as the error `models_pattern_no_match` (below).
+datasets; `valdo check` then reports it as the error `models_pattern_no_match` (below). With
+`--phases refine` and no `--phenix`/`--ccp4`, init looks for the program on PATH: if its
+installation has the setup script, init writes that folder to `programs.phenix` /
+`programs.ccp4` (comment "found on PATH by valdo init"); if the program is not on PATH at all,
+init warns and leaves the setting empty. Set it in `valdo.yaml` before `valdo run`.
 
 ## Messages from `valdo check` (and the start of `valdo run`)
 
@@ -56,7 +67,12 @@ Errors (`ERROR`) stop `valdo run`. Warnings (`WARN`) and information (`info`) do
 | `login_node` | warning | You are on a shared login node: check here, then run as a batch job (`valdo jobscript -o run_valdo.sh`). |
 | `ncpu_high` | warning | `compute.ncpu` is larger than the CPUs available: lower it, or request more slots. |
 | `low_disk` | warning | Little free space for the work folder: a run needs roughly 12 MB per dataset (measured on PTP1B: 3.7 GB for 300 datasets, 20 GB for 1,680). Move `workdir` to scratch. |
-| `refine_program_missing` | error | dimple or phenix.refine is not on PATH: load CCP4 (`source .../ccp4.setup-sh`) or PHENIX in this shell or job script. |
+| `refine_program_missing` | error | `phases.source` is `refine`, but dimple or phenix.refine is not on PATH and `programs.ccp4` / `programs.phenix` is not set. Simplest: set it in `valdo.yaml` to the installation folder (`programs.ccp4: /opt/ccp4-9`, `programs.phenix: /opt/phenix-2.2-6143`); valdo then sets the program up itself in every command and batch job. See [USER_GUIDE.md](USER_GUIDE.md#refinement-programs). |
+| `program_not_found` | error | `programs.phenix` / `programs.ccp4` points to no installation (the path does not exist, or there is no `phenix_env.sh` / `bin/ccp4.setup-sh` in or near it). Give the installation folder. A csh script (`ccp4.setup-csh`, `phenix_env.csh`) cannot be used: give the folder or the sh script. |
+| `program_setup_failed` | error | The installation's setup script stopped the shell or failed, or the program is not on PATH after sourcing it. Test it by hand: `bash -c 'source /opt/ccp4-9/bin/ccp4.setup-sh && which dimple'` (PHENIX: `source <phenix>/phenix_env.sh && which phenix.refine`). |
+| `refine_program` | info | Which refinement program and version the refine stage will use, and where it comes from (`programs.*` in `valdo.yaml`, or PATH). |
+| `program_changed` | warning | The existing refinements were made by another version of the refinement program than the one set up now, or by several versions (the message counts the refined variants per version, from `04_refine/refine_summary.csv`). Only the version counts: the same version in another folder is no change. Datasets already refined are not refined again, so the results would mix versions. To refine everything with the version set up now: delete `<workdir>/04_refine/runs` and `valdo run --from refine`. Otherwise nothing to do. |
+| `programs_unused` | info | `programs.phenix` or `programs.ccp4` is set but the project does not use it (another `phases.program`, or `phases.source` is not `refine`). Harmless. |
 | `refine_unavailable` | error | The refinement module failed to load: a bug, please report. |
 
 **Inputs**
@@ -91,6 +107,17 @@ Errors (`ERROR`) stop `valdo run`. Warnings (`WARN`) and information (`info`) do
 | `reindex_impossible` | error | `reindex: true` but the lattice allows no alternative indexing: set `reindex: auto`. |
 | `reindex_unknown` | warning | Alternative indexing could not be determined (unusual cell or space group); set `reindex` explicitly. |
 
+**Twin refinement** (`phases.source: refine`; laws in the reference dataset's indexing)
+
+| code | level | what to do |
+|---|---|---|
+| `twin_law` | info | Says whether twin refinement is on (`phases.twin_law`; with `auto`, the law it stands for) and which twin laws the reference lattice allows (also in `valdo check --json`: `inputs.twin.possible`). Nothing to do unless your crystals are twinned: then set `phases.twin_law` to the law phenix.xtriage or your processing program reports, or to `auto` when the lattice allows only one (see [USER_GUIDE.md](USER_GUIDE.md#twinned-crystals)). |
+| `twin_law_ambiguous` | error | `phases.twin_law: auto`, but the reference lattice allows several twin laws, and only one is refined. Set `phases.twin_law` to the law phenix.xtriage or your processing program reports (the message lists the possible ones). |
+| `twin_law_unchecked` | warning / error | valdo could not analyse the reference dataset's lattice (no cell or space group in its MTZ header, or gemmi could not determine its twin laws). With a law (warning): it is used unchecked, so compare it with phenix.xtriage. With `auto` (error): there is nothing to take the law from; set the law itself, or `null`. |
+| `twin_law_is_symmetry` | error | `phases.twin_law` is a symmetry operation of the crystal, so it describes no twinning (e.g. `k,h,-l` in P 31 2 1). Use a law from the message, or `null`. |
+| `twin_law_none_possible` | error | The reference dataset's space group and cell allow no (pseudo-)merohedral twinning (also for `auto`). Set `phases.twin_law: null`; if you expected twinning, check the space group and cell. |
+| `twin_law_invalid` | error | `phases.twin_law` is not a symmetry of this lattice. Use one of the laws the message lists. |
+
 **Settings**
 
 | code | level | what to do |
@@ -120,7 +147,7 @@ Errors (`ERROR`) stop `valdo run`. Warnings (`WARN`) and information (`info`) do
 | `locked` | Another `valdo run` uses this work folder (its lock file, `<workdir>/.lock`, had a sign of life less than 5 minutes ago). | Wait, watching `valdo status` (its JSON result then has `wait` and `next: ["valdo status"]`). If that run was killed, its lock counts as abandoned 5 minutes after its last heartbeat (the message gives the time) and the next `valdo run` replaces it; do not delete `.lock` by hand while a run may be active. A job resubmitted within 5 minutes of a killed one can stop with `locked`: submit it again a few minutes later. |
 | `bad_stage` | `--from/--until/--only` names an unknown stage. | `valdo stages` lists the names. |
 | `stage_not_applicable` | That stage does not run in this project (e.g. `refine` with phases from the data). | `valdo status` shows the stages that apply. |
-| `bad_options` | Options that cannot be combined (`--only` with `--from`, `--until` before `--from`, two project files). | Use one form. |
+| `bad_options` | Options that cannot be combined (`--only` with `--from`, `--until` before `--from`, two project files; for `valdo init`, `--twin-law` without `--phases refine`), or an unknown option or a missing value (with `--json` this is the JSON error result too). | Use one form; `valdo <command> --help` lists the options. |
 | `prerequisite_missing` | `--from`/`--only` asks for a stage whose earlier stages have not finished. | Run `valdo run` (or `--until` the missing stage) first. |
 | `foreign_folder` | A stage folder exists, is not empty and was not made by valdo. valdo never deletes it. | Move it away or choose another `workdir`. |
 | `not_a_folder` | A file sits where a stage folder should be. | Move it away. |
@@ -153,7 +180,7 @@ explanation. This table is generated from `valdo/easy/hints.py`:
 | `no_torch` | any | PyTorch is not installed in this Python environment. | valdo was started from an environment without torch. | Activate the VALDO environment (see environment.yml) and rerun; 'valdo check' lists the packages it found. |
 | `no_package` | any | A required Python package is missing. | The active environment is not the VALDO environment. | Activate the VALDO environment (see environment.yml); 'valdo check' lists the packages it found. |
 | `gemmi_api` | any | The installed gemmi is too new for VALDO. | VALDO needs gemmi 0.6.7 or older (newer versions renamed functions it uses). | Install gemmi 0.6.7 in the VALDO environment: pip install 'gemmi==0.6.7'. |
-| `refine_program` | refine | The refinement program could not be started. | phenix or CCP4 (dimple) is not set up in this shell or batch job. | Load PHENIX/CCP4 before running VALDO (e.g. source .../ccp4.setup-sh), check with 'valdo check', then rerun. |
+| `refine_program` | refine | The refinement program could not be started. | phenix or CCP4 (dimple) is not set up for valdo: programs.phenix/programs.ccp4 is not set in valdo.yaml and the program is not on PATH in this shell or batch job. | Set programs.phenix (or programs.ccp4) in valdo.yaml to the installation folder, check with 'valdo check', then rerun. |
 | `timeout` | refine | Refinement of some datasets took longer than the time limit. | Slow refinements or an overloaded node. | Increase advanced.refine.timeout_min in valdo.yaml and rerun; finished datasets are kept. |
 | `pool_broken` | any | A worker process died. | Usually out of memory with many parallel workers. | Lower compute.ncpu or request more memory, then rerun 'valdo run'. |
 | `stale_handle` | any | The network file system lost track of a file. | Files were changed or deleted by another process while VALDO was running. | Make sure only one VALDO run uses this work directory, then rerun 'valdo run'. |
@@ -174,6 +201,14 @@ explanation. This table is generated from `valdo/easy/hints.py`:
 | `valdo status` shows stages `out of date` after a complete run | A setting, an input file (or its time stamp) changed after the run, or a newer valdo-easy prepares that stage's inputs differently (e.g. 0.0.6+easy.1 reruns `add_phases_and_blobs`, `tag_blobs` and `report` once). | `valdo run --dry-run` says what changed and what would rerun. |
 | A top hit with `Sign` `negative` or `mixed` | The blob search is sign-blind (it ranks \|difference\|): a blob can be density that left (negative), or new and lost density of similar strength (mixed, e.g. a moved side chain). | `Sign` says which side dominates within the blob (at 3 sigma, by a factor 1.5); a bound ligand is usually positive, often with weaker negative density of displaced water. Open the map: green = appeared, red = left. |
 | Ranks in the top-hit table skip numbers | Lower-ranked blobs that are symmetry copies of a blob already listed are left out (upstream's duplicate tag only catches copies next in peak order and within 1 A). | Nothing to do; `blobs.csv` keeps every blob and marks copies in `symmetry_copy_of` (the rank of the blob they copy). |
+| Twin refinement: `twin_fraction` 0 and `twin_note` "REFMAC kept no twin domain" in `datasets.csv` | dimple (REFMAC) tests each dataset for twinning and refines only twin laws with a fraction of at least 0.07; below that the dataset is refined as untwinned. | Nothing to do: these datasets are (almost) untwinned. |
+| Twin refinement: `twin_note` "REFMAC kept twin law ..., not the configured ..." | REFMAC chooses the twin laws itself; with several possible laws (e.g. P 3, P 31, P 32, pseudo-cubic cells) it can keep another one than `phases.twin_law`, or several. | Check that `phases.twin_law` is the law of your crystals (xtriage / ctruncate); the refinement used REFMAC's law(s), shown in `twin_law`. |
+| Twin refinement: `twin_fraction` above 0.5 | The two twin domains are about equal, or the dataset's larger domain is in the other indexing. | The phases follow the dataset's own model; near 0.5 twinned data carry little information about which domain is which (expect noisier maps). |
+| Datasets fail at `refine` with "could not relate the refined MTZ to the input data" and two operators both above 0.9 (e.g. `x,y,z: 1.000, -x,-y,z: 0.913`); the reason ends with "both indexings fit, as for twinned data", and `valdo run` counts these datasets | Twinned data refined without twin refinement: the amplitudes look alike under the twin law, so the indexing of the refined MTZ cannot be told from them (seen with dimple on a dataset with twin fraction 0.25). phenix.refine never re-indexes, so its results are kept in the input indexing instead, with the same hint in `reason` (`04_refine/refine_summary.csv`). | If the crystals are twinned, set `phases.twin_law` (`valdo check` lists the possible laws): twin refinement takes the indexing from the program itself. See [USER_GUIDE.md](USER_GUIDE.md#twinned-crystals). |
+| phenix.refine fails with `Sorry: Multiple equally suitable arrays of observed xray data found` or `Sorry: Please resolve the R-free flags mismatch` | Seen with valdo-easy before 0.0.6+easy.1's fix, or when `advanced.refine.extra_args` sets the data labels or `ignore_pdb_hexdigest` itself. valdo now names the data columns with `miller_array.labels.name` (PHENIX 1.20 and later ignore `xray_data.labels`) and sets `xray_data.r_free_flags.ignore_pdb_hexdigest=True` (start models refined before against another R-free set, e.g. every PanDDA input model, carry a hexdigest of it). | Remove those settings from `extra_args`, or give all of them yourself (valdo then adds none). |
+| phenix.refine fails with `Sorry: Ambiguous parameter definition: twin_law = ...` | A bare `twin_law=` in `advanced.refine.extra_args` (PHENIX has `xray_data.twin_law` and `neutron_data.twin_law`). valdo refuses twin laws in `extra_args`. | Set the law in `phases.twin_law`; valdo gives phenix.refine `xray_data.twin_law=...`. |
+| The refine log says "repaired the packaged .eff" or "dropped from the packaged .eff" | The `.eff` that comes with upstream VALDO (`refine_drug.eff`) names an R-free file on the authors' cluster, sets `output.quiet` (not a phenix.refine parameter) and never closes its `refine {` scope, so PHENIX ignored the whole file. valdo-easy copies it into `04_refine/` with these three lines repaired; the upstream file is unchanged. | Nothing to do. With your own `.eff` (`advanced.refine.eff`), valdo uses it as it is, and stops if its braces do not balance. |
+| Datasets fail at `refine` with "neither reindexed.mtz nor the alt_reindex record of dimple.log says how" or "dimple wrote no dimple.log" | Twin refinement only: valdo takes the indexing of dimple's output from dimple itself (pointless's `reindexed.mtz`, or the `alt_reindex` record in `dimple.log`); here that record is missing or unreadable (another dimple version?), so the phases cannot be placed safely. | Read `04_refine/runs/<stem>/dimple/dimple.log`; please report the dimple version. |
 | Datasets dropped at `add_phases_and_blobs` with "needs an origin shift" | They were re-indexed, and in this space group their own phases (and model) cannot be moved into the reference's setting without an origin shift (e.g. P 21 21 21 with a = b). | Use `phases.source: refine`: refinement then happens in the re-indexed setting. |
 
 ## Pitfalls of plain upstream VALDO that valdo-easy avoids

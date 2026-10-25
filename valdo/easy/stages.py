@@ -404,9 +404,15 @@ def applicable_refine(ctx):
 
 def build_refine(ctx):
     r = ctx.project["advanced"]["refine"]
-    return {"program": ctx.project["phases"]["program"], "out_dir": ctx.dir("04_refine"),
-            "jobs": ctx.path("configs/refine_jobs.json"), "eff": r["eff"],
-            "extra_args": list(r["extra_args"]), "timeout_min": r["timeout_min"], "ncpu": ctx.ncpu}
+    cfg = {"program": ctx.project["phases"]["program"], "out_dir": ctx.dir("04_refine"),
+           "jobs": ctx.path("configs/refine_jobs.json"), "eff": r["eff"],
+           "extra_args": list(r["extra_args"]), "timeout_min": r["timeout_min"], "ncpu": ctx.ncpu}
+    if ctx.project["phases"].get("twin_law"):   # only then, so that other projects keep their fingerprint
+        from valdo.easy.check import resolve_twin_law
+        cfg["twin_law"] = resolve_twin_law(ctx.project, ctx.inputs)   # 'auto' -> the reference lattice's law
+    # Where the program comes from (programs.phenix / programs.ccp4) is not part of the config: moving or
+    # updating an installation does not refine every dataset again ('valdo check' warns when it changed).
+    return cfg
 
 
 def _refine_jobs(ctx):
@@ -464,16 +470,60 @@ def pre_refine(ctx, cfg, res):
                 ident = _stem(job[1]).split("_")[0]
                 res.flag(ident, "model_frame_mismatch")
                 print(f"warning: could not transform {job[0]} with {job[2]}: {err}")
+    _variant_twin_laws(ctx, cfg, jobs)
     with open(cfg["jobs"], "w") as handle:
         json.dump(jobs, handle, indent=1)
-    ctx.scratch["refine_jobs"] = [{k: j[k] for k in ("stem", "id", "symop", "mtz", "pdb")} for j in jobs]
+    ctx.scratch["refine_jobs"] = [{k: j[k] for k in ("stem", "id", "symop", "mtz", "pdb", "twin_law") if k in j}
+                                  for j in jobs]
+
+
+def _variant_twin_laws(ctx, cfg, jobs):
+    """Twin refinement with reindexing: the twin law of every indexing variant that is not the one
+    matching the reference (job["twin_law"], where it is written differently). phases.twin_law is
+    given in the reference indexing; a variant re-indexed by another operator can need another law
+    (twin.law_for_variant: only lattices with several twin laws that do not commute)."""
+    law = cfg.get("twin_law")
+    if not law or not ctx.reindexed:
+        return
+    from valdo.easy import twin
+    from valdo.easy.check import reference_lattice
+    lattice = reference_lattice(ctx.inputs)
+    if twin.is_auto(law) or lattice is None:
+        return
+    best = ctx.outputs("reindex").get("best_symop") or {}
+    for job in jobs:
+        ident, symop = parse_stem(job["stem"])
+        b = best.get(ident)
+        if symop is None or b is None or int(symop) == int(b):
+            continue
+        try:
+            moved = twin.law_for_variant(law, ctx.ops_hkl[int(b)], ctx.ops_hkl[int(symop)], lattice[1])
+        except Exception as exc:  # gemmi missing or an exotic space group
+            print(f"warning: twin law of variant {job['stem']} not worked out ({exc}); refining {law}")
+            continue
+        if moved != law:
+            job["twin_law"] = moved
 
 
 def execute_refine(ctx, cfg, res):
-    from valdo.easy import refine
+    from valdo.easy import programs, refine, twin
+    if twin.is_auto(cfg.get("twin_law")):
+        raise StageError("phases.twin_law is auto, but the twin law could not be worked out from the reference "
+                         "dataset's lattice.", "auto needs a lattice with exactly one twin law.",
+                         "Run 'valdo check' (it says why), then set phases.twin_law to the law itself (e.g. "
+                         "-h,-k,l) or to null, and run again.")
+    info = programs.for_project(ctx.project)
+    ctx.scratch["refine_program"] = programs.public(info)
+    if info is not None and info.get("error"):
+        err = info["error"]
+        raise StageError(err["what"] + ".", "The refinement program could not be set up.",
+                         err["fix"] + " Then run 'valdo check' and 'valdo run' again.")
+    for note in (info or {}).get("notes") or []:
+        print(f"[refine] note: {note}", flush=True)
     refine.refine_datasets(ctx.scratch["refine_jobs"], cfg["program"], cfg["out_dir"], ncpu=cfg["ncpu"],
                            eff=cfg["eff"], extra_args=cfg["extra_args"], timeout_min=cfg["timeout_min"],
-                           log=lambda text: print(text, flush=True))
+                           log=lambda text: print(text, flush=True), twin_law=cfg.get("twin_law"),
+                           program_info=info)
 
 
 def post_refine(ctx, cfg, res):
@@ -483,7 +533,7 @@ def post_refine(ctx, cfg, res):
         raise StageError("refine wrote no refine_summary.csv.", "Refinement stopped before the end.",
                          "Read logs/refine.log.")
     table = pd.read_csv(path, dtype=str, keep_default_na=False)
-    rfree, status, reason = {}, {}, {}
+    rfree, status, reason, twin = {}, {}, {}, {}
     for rec in table.to_dict("records"):
         stem = rec["stem"]
         status[stem] = rec.get("status", "")
@@ -493,6 +543,8 @@ def post_refine(ctx, cfg, res):
             rfree[stem] = value if math.isfinite(value) else None
         except ValueError:
             rfree[stem] = None
+        if cfg.get("twin_law") and status[stem] == "ok":
+            twin[stem] = [rec.get("twin_law", ""), _float_or_none(rec.get("twin_fraction")), rec.get("twin_note", "")]
     for row in ctx.alive():
         if row["id"] in res.dropped:
             continue
@@ -502,7 +554,39 @@ def post_refine(ctx, cfg, res):
             why = "; ".join(sorted({reason.get(s, "not run") for s in stems})) or "not run"
             res.drop(row["id"], f"refinement failed ({why}; see 04_refine/runs/)")
     res.outputs = {"rfree": rfree, "status": status}
+    from valdo.easy.refine import TWIN_HINT
+    # failed refinements (the frame check could not decide) and phenix.refine results kept in the input
+    # indexing although the amplitudes also fit a twin law (refine._phenix_identity)
+    hinted = sorted({parse_stem(s)[0] for s, why in reason.items() if TWIN_HINT in why})
+    if hinted and not cfg.get("twin_law"):
+        res.messages.append(f"{len(hinted)} dataset(s) have a refined variant that fits two indexings, as twinned "
+                            "data do (" + ", ".join(hinted[:5]) + (", ..." if len(hinted) > 5 else "") +
+                            "): if the crystals are twinned, set phases.twin_law ('valdo check' lists the "
+                            "possible laws)")
+    if ctx.scratch.get("refine_program") is not None:
+        res.outputs["program"] = ctx.scratch["refine_program"]
+    if cfg.get("twin_law"):
+        from valdo.easy.twin import zero_fraction_text
+        res.outputs["twin_law"] = cfg["twin_law"]
+        res.outputs["twin"] = twin
+        fractions = sorted(v[1] for v in twin.values() if v[1] is not None)
+        if fractions:
+            mid = fractions[len(fractions) // 2] if len(fractions) % 2 else \
+                0.5 * (fractions[len(fractions) // 2 - 1] + fractions[len(fractions) // 2])
+            none = sum(1 for v in twin.values() if v[1] == 0.0)
+            res.messages.append(f"twin refinement ({cfg['twin_law']}): median twin fraction {mid:.3f} "
+                                f"(range {fractions[0]:.3f}-{fractions[-1]:.3f}) over {len(fractions)} refined "
+                                "variant(s)" + (f"; {zero_fraction_text(cfg['program'], none)}"
+                                                if none else ""))
     res.n_out = res.n_in - len(res.dropped)
+
+
+def _float_or_none(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +604,9 @@ def build_filter(ctx):
 
 def extras_filter(ctx):
     extras = {"rule": "valdo-easy/1: one variant per dataset (lowest refined R-free, else best reindex CC)"}
+    if ctx.project["phases"].get("twin_law") and ctx.stage_applicable("refine"):   # only then: see _twin_choice
+        extras["twin_rule"] = (f"valdo-easy/1: twin refinement: lowest refined twin fraction (by >= "
+                               f"{TWIN_CHOICE_MARGIN}), else best reindex CC")
     gone = _stems_dropped_after_scale(ctx)
     if gone:   # only when datasets left the pipeline between scale and filter (refine)
         extras["excluded"] = gone
@@ -551,12 +638,18 @@ def _filter_choice(ctx):
         if refine_out is not None:
             rf = {s: refine_out["rfree"].get(s) for s in mine
                   if refine_out["status"].get(s) == "ok" and refine_out["rfree"].get(s) is not None}
-            chosen = min(rf, key=lambda s: (rf[s], s)) if rf else None
+            chosen, why = None, None
+            if refine_out.get("twin_law") and len(rf) > 1:
+                chosen, why = _twin_choice(rf, refine_out.get("twin") or {},
+                                           f"{ident}_{best_symop[ident]}" if ident in best_symop else None)
+            if chosen is None:
+                chosen = min(rf, key=lambda s: (rf[s], s)) if rf else None
             for s in mine:
                 if s == chosen:
-                    table[s] = (rf[s], rf[s], "lowest refined R-free")
+                    table[s] = (rf[s], rf[s], why or "lowest refined R-free")
                 elif s in rf:
-                    table[s] = (99.0, rf[s], f"higher R-free than {chosen}")
+                    table[s] = (99.0, rf[s], f"not chosen: {chosen} has the {why}" if why else
+                                f"higher R-free than {chosen}")
                 else:
                     table[s] = (99.0, "", "refinement failed")
         else:
@@ -571,6 +664,29 @@ def _filter_choice(ctx):
                     (99.0, "", "alternative indexing (lower CC to reference)")
         choice[ident] = (chosen, table)
     return choice
+
+
+# Twin refinement: refined twin fractions of two indexings must differ by this much to tell them apart
+TWIN_CHOICE_MARGIN = 0.1
+
+
+def _twin_choice(rf, twin, best):
+    """Twin refinement (phases.twin_law): which of several refined indexings of one dataset to keep.
+
+    R-free cannot tell them apart: twin refinement fits the data in either indexing about equally
+    well (the twin fraction becomes 1 - f in the other one). The refined twin fraction can, when the
+    model stays in the reference setting: the indexing whose larger twin domain matches the model has
+    the lower fraction. When the fractions do not differ by TWIN_CHOICE_MARGIN (a twin fraction near
+    0.5, or a per-dataset model moved with the data), the indexing that correlates best with the
+    reference (reindex stage) is kept. Returns (stem, reason) or (None, None) for the R-free rule."""
+    fractions = {s: (twin.get(s) or [None, None])[1] for s in rf}
+    if all(f is not None for f in fractions.values()):
+        ranked = sorted(rf, key=lambda s: (fractions[s], rf[s], s))
+        if fractions[ranked[1]] - fractions[ranked[0]] >= TWIN_CHOICE_MARGIN:
+            return ranked[0], "lowest refined twin fraction (twin refinement: R-free cannot tell the indexings apart)"
+    if best in rf:
+        return best, "best indexing by CC to the reference (twin refinement fits every indexing about equally)"
+    return None, None
 
 
 def pre_filter(ctx, cfg, res):
@@ -607,6 +723,7 @@ def post_filter(ctx, cfg, res):
     scale_out = ctx.outputs("scale")
     f = ctx.project["advanced"]["filter"]
     choice = ctx.scratch.get("filter_choice") or _filter_choice(ctx)
+    twin = ctx.outputs("refine").get("twin") if ctx.stage_applicable("refine") else None
     kept_map = {}
     for row in ctx.alive():
         ident = row["id"]
@@ -618,6 +735,10 @@ def post_filter(ctx, cfg, res):
             kept_map[ident] = stem
             res.set(ident, variant=stem,
                     reindex_op=ctx.ops_hkl[int(parse_stem(stem)[1])] if ctx.reindexed else "")
+            if twin is not None and stem in twin:
+                law, fraction, note = twin[stem]
+                res.set(ident, twin_law=law, twin_fraction="" if fraction is None else f"{fraction:.4g}",
+                        twin_note=note)
             continue
         if chosen is None:
             res.drop(ident, "refinement failed for every indexing variant")

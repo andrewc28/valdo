@@ -11,11 +11,13 @@ import os
 import re
 import tempfile
 
-# Column order of datasets.csv. The first eleven are the documented contract.
+# Column order of datasets.csv. The first eleven are the documented contract. The twin columns are
+# filled only with twin refinement (phases.twin_law): the law and twin fraction of the kept variant.
 DATASET_COLUMNS = [
     "id", "original_name", "source_mtz", "model", "phases_source", "variant",
     "reindex_op", "status", "dropped_stage", "dropped_reason", "flags",
     "phase_file", "bound_model", "space_group", "cell", "d_min", "n_reflections",
+    "twin_law", "twin_fraction", "twin_note",
 ]
 
 STEM_RE = re.compile(r"^(\d+)(?:_(\d+))?$")

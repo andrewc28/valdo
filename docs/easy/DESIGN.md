@@ -38,6 +38,8 @@ valdo-easy is an **accessibility layer, not new science**. It is based on upstre
 | `stages.py` | A | the stage table: config builders, pre-hooks, post-conditions |
 | `runner.py` | A | state, fingerprints, locking, log capture, cleaning, progress |
 | `refine.py` | B | refinement with phenix / dimple (`phases.source: refine`) |
+| `programs.py` | B | `programs.phenix` / `programs.ccp4`: finds the installation, sources its setup script in a clean `bash`, returns the program and its environment (cached per process) |
+| `twin.py` | B | twin laws (`phases.twin_law`): hkl parsing, possible laws of a lattice, checks, REFMAC/PHENIX twin output parsers |
 | `report.py`, `maps.py` | B | report, per-hit maps, viewer scripts |
 | `jobscript.py` | B | SGE / SLURM job scripts |
 | `docgen.py` | C | generates `docs/easy/CONFIG_REFERENCE.md` (from the schema) and the hint table of `TROUBLESHOOTING.md` (from `hints.py`); `tests/easy/test_docs.py` fails when they are stale |
@@ -53,6 +55,7 @@ Only `valdo run` imports the upstream stage modules, inside the stage that needs
 valdo --version [--json]
 valdo init [DATA] (--apo PDB | --models PATTERN) [--apo PDB] [-o valdo.yaml] [--workdir DIR]
            [--phases auto|input_mtz|refine|existing] [--existing PATTERN] [--program phenix|dimple]
+           [--phenix PATH] [--ccp4 PATH] [--twin-law LAW|auto]
            [--columns F,SIGF] [--reindex auto|true|false] [--reference NAME]
            [--focal-seqid N] [--focal-radius A] [--bound-models PATTERN] [--ligand-resnames LIG[,X]]
            [--ncpu N] [--force] [--json]
@@ -114,10 +117,12 @@ of `valdo.yaml`; enums and ranges are checked; missing optional keys take the de
 | `models.apo` | null | one apo PDB for every dataset; fallback for datasets without their own model; refinement start model | blobs/tag `model_folder` (via `inputs/models/`) |
 | `models.per_dataset` | null | per-dataset models: a `{name}` pattern, folder or glob (matched by dataset name) | same |
 | `workdir` | `valdo_run` | all outputs | every output path |
+| `programs.phenix` / `programs.ccp4` | null | installation folder (or setup script, bin folder, program) of PHENIX / CCP4; null = from PATH | not in any config (see section 4, refine) |
 | `columns.amplitude` / `.sigma` | detected | observed amplitude and sigma columns | standardize `expcolumns`; renamed to `F-obs`/`SIGF-obs` in `inputs/mtz/` if different |
 | `phases.source` | detected | `input_mtz` (map coefficients in the data files), `refine` (refine every dataset), `existing` (user's refined MTZs) | add_phases_and_blobs `phasing_path` |
 | `phases.existing` | null | refined MTZs for `existing` (`{name}` pattern, folder or glob) | |
 | `phases.program` | null | `phenix` or `dimple` for `refine` | |
+| `phases.twin_law` | null | twin law (hkl notation, reference indexing) for twin refinement, or `auto` (the only law of the reference lattice); `refine` only | `configs/refine.yaml` `twin_law` (only when set; `auto` resolved to the law, `check.resolve_twin_law`) |
 | `phases.columns.fwt/phwt/delfwt/phdelwt` | detected | 2mFo-DFc amplitude/phase, mFo-DFc amplitude/phase in the phase files | `phase_2FOFC_col_in` = phwt, `phase_FOFC_col_in` = phdelwt |
 | `phases.rfree` | detected | R-free flag column in the phase files | `rfree_label_in` |
 | `reindex` | `auto` | `auto` (only if the reference lattice admits alternative indexing, `gemmi.find_twin_laws(cell, sg, 3, False)` as upstream), `true`, `false` | reindex stage on/off |
@@ -188,6 +193,7 @@ Fixed plumbing (not user settings): column names after standardize `F-obs`/`SIGF
 | `phase_file` | phase MTZ used by add_phases_and_blobs |
 | `bound_model` | known bound model (validation), if any |
 | `space_group`, `cell`, `d_min`, `n_reflections` | from the MTZ header |
+| `twin_law`, `twin_fraction`, `twin_note` | twin refinement only (`phases.twin_law`): the law refined for the kept variant, its refined twin fraction (empty if not found) and a note (another law kept by REFMAC, no twin domain, fraction not found); empty otherwise |
 
 `datasets.csv` is a view rebuilt after every stage from the base table (input scan) plus the
 recorded contributions (drops, flags, values) of each finished stage in `valdo_state.json`, so a
@@ -277,13 +283,60 @@ with pristine upstream code), pre-hook, post-conditions, and what goes into `dat
    input indexing by amplitude CC under the identity and each twin law (`find_frame_op`): the best
    operator must reach 0.9 and beat every other one by 0.1. (dimple/refmac write F after
    anisotropic scaling: CC 0.977-0.9998 in the right frame on 39 PTP1B datasets, 0.47 in the
-   wrong one; an earlier fixed 0.98 cut-off rejected a valid refinement.)
+   wrong one; an earlier fixed 0.98 cut-off rejected a valid refinement.) phenix.refine never
+   re-indexes and writes the input's own F, so when the margin is not met its identity is kept
+   if it is the best operator and reaches 0.9 (`refine._phenix_identity`; a real PTP1B dataset
+   gave x,y,z 1.000, -x,-y,z 0.921 with PHENIX 1.21.2 and 2.2.1 and was dropped before), with the
+   twin hint in the result's `reason`.
+   Program location: `programs.for_project` resolves `programs.<family>` (or PATH) once per
+   process; the stage passes the executable and the environment from the installation's setup
+   script (`program_info`) to `refine_datasets` and records `programs.public(info)` as the stage
+   output `program` (shown by `valdo status`, the report, and compared by `valdo check`:
+   `program_changed`). The location is deliberately not part of the stage config or the
+   per-dataset fingerprint, so moving or updating an installation does not refine everything
+   again; `valdo check` compares only the version (`programs.version_differs`) with the versions
+   counted in `refine_summary.csv`. phenix.refine command (PHENIX 1.21.2 and 2.2.1 checked):
+   `<exe> <pdb> <mtz> output.prefix=refine_<stem> <eff> miller_array.labels.name=<F>,<SIGF>
+   [xray_data.r_free_flags.generate=True | miller_array.labels.name=<free> when several flag
+   columns] xray_data.r_free_flags.ignore_pdb_hexdigest=True [xray_data.twin_law=<law>]
+   <extra_args> --overwrite` (each of valdo's settings left out when `extra_args` sets it;
+   `PHENIX_COMMAND_VERSION` in the per-dataset fingerprint). `prepare_eff` writes the packaged
+   `refine_drug.eff` to `04_refine/phenix_refine.eff` with three repairs (the missing R-free
+   `file_name` line and `output.quiet` dropped, the unclosed `refine {` scope closed before
+   `main {`); a user `.eff` is used as it is unless its braces do not balance (error).
+   Twin refinement (`phases.twin_law`, added to the stage config only when set, so other
+   projects keep their fingerprint; `auto` is resolved from the reference lattice by
+   `check.resolve_twin_law` in `build_refine`, and `execute_refine` refuses an unresolved one):
+   phenix `xray_data.twin_law=<law>`, dimple `--refmac-key twin` (jelly-body and final
+   restrained refmacat runs only). The law is given in the reference indexing; `pre_refine`
+   writes a job's own `twin_law` for a variant whose re-indexing operator does not commute with
+   it (`twin.law_for_variant`: M^-1 L M with M = B^-1 V, B the dataset's best operator, V the
+   variant's; only lattices with several non-commuting laws, e.g. pseudo-cubic ones). In twin mode the frame operator comes
+   from the program instead of `find_frame_op` (REFMAC's output F are detwinned: CC with the
+   input 0.89-0.999 under the right operator, and near-equal under both at a twin fraction
+   of 0.5): phenix identity; dimple: identity unless the `[pointless]` section of `dimple.log`
+   has a non-empty `alt_reindex` (dimple 2.7 then refines pointless's `reindexed.mtz`), in which
+   case the candidate under which `reindexed.mtz` equals the input amplitudes exactly, else the
+   inverse of the first `alt_reindex` operator; then a loose CC check (>= 0.5). Per variant: `twin_law`, `twin_fraction`, `twin_note`
+   (REFMAC domains from final.mmcif `_pdbx_reflns_twin`, else REMARK 3 "TWIN DETAILS"; laws
+   conjugated back into the input indexing and compared modulo the space group's rotations and
+   -1; PHENIX: REMARK 3 "TWINNING INFORMATION" FRACTION/OPERATOR, else the mmCIF
+   `_pdbx_reflns_twin`, else the last `r_work=... twin_fraction=... twin_law=...` line of its log,
+   formats checked on 1.21.2 and 2.2.1 output); stage outputs `twin_law` and `twin` {stem: [law,
+   fraction, note]}. Without twin refinement, a failed frame check where two operators reach
+   0.9 (or a phenix.refine result kept in the input indexing in that situation) gets the hint
+   "both indexings fit, as for twinned data" (`refine.TWIN_HINT`), and `post_refine` counts
+   those datasets in a stage message.
 5. **filter**: upstream `run_filter` on `configs/filter_input.csv` (columns `file_idx, symop,
    Rf_final, Rf_refined, selected, note`). With refinement: `Rf_final` = refined R-free for the
    lowest-R-free variant of each dataset, `99` for the other variants and failed refinements
    (identical to upstream for two variants; well defined for three or more). Without refinement
    (E8): `Rf_final` = 0 for `best_symop`, 99 for other variants, so exactly the best-CC variant
    survives; the all-NaN and `min_cc` checks still run. `metrics` is passed explicitly.
+   With twin refinement (`phases.twin_law`) R-free cannot tell indexing variants apart (the twin
+   fraction becomes 1 - f), so among several refined variants the one with the lowest refined
+   twin fraction is kept when it is lower by >= 0.1 (`TWIN_CHOICE_MARGIN`), else `best_symop`,
+   else the R-free rule (extras `twin_rule`, only in twin mode).
    Upstream's filter keeps every scaled file without a row in this table, so every other file in
    `03_scale/` (variants of datasets dropped after scale, e.g. by failed refinement) gets a row
    with `Rf_final` 99 and the note "dataset no longer in the pipeline (<stage>: <reason>)"; the

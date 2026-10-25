@@ -82,8 +82,9 @@ When two indexings are about equally good (difference below `advanced.reindex.cc
 both are kept until the filter stage chooses one. *Can go wrong:* datasets with very weak or
 incomplete data correlate poorly under every indexing. *Look at:* the CC histogram in the
 report; the `reindexed` and `ambiguous_indexing` flags. Twinned crystals (where both
-indexings are present in one crystal) are not handled specially: their correlations are
-lower and they may be dropped by filter.
+indexings are present in one crystal) correlate less well under either indexing and may be
+dropped by filter; with refinement they can be refined as twinned (see
+[Twinned crystals](#twinned-crystals)).
 
 **3. scale** (`03_scale/`). Puts every dataset on the reference's scale (overall scale and
 anisotropic B factor). *Can go wrong:* a dataset with too few reflections in common with the
@@ -100,7 +101,8 @@ successfully are reused and only the failed ones run again. *Look at:*
 `04_refine/refine_summary.csv` (R-work and R-free per dataset).
 
 **5. filter** (`05_filter/`). Keeps one indexing variant per dataset (the lower R-free after
-refinement, otherwise the higher reindexing CC) and drops datasets that (a) have an R-free
+refinement, otherwise the higher reindexing CC; with twin refinement the lower twin fraction,
+see [Twinned crystals](#twinned-crystals)) and drops datasets that (a) have an R-free
 above `advanced.filter.max_rfree` (refinement only), (b) did not scale, or (c) correlate with
 the reference below `advanced.filter.min_cc` (0.55). Datasets that left the pipeline before
 (e.g. their refinement failed) are kept out too: the table the filter reads
@@ -149,8 +151,13 @@ dataset (or a very similar one).
   the same coordinates.
 - **`refine`**: valdo refines every dataset. `dimple` (CCP4, free for academic use) runs
   rigid-body and restrained refinement; `phenix` uses `phenix.refine` with the packaged
-  `refine_drug.eff`, as upstream VALDO did. PHENIX must come from your own licence and
-  installation. Refinement takes about a minute per dataset per core.
+  `refine_drug.eff`, as upstream VALDO did (repaired: as shipped, PHENIX ignored the whole file;
+  see below). PHENIX must come from your own licence and installation. Refinement takes about
+  a minute per dataset per core with dimple and about 6-11 with phenix.refine (batch runs on
+  Wynton: median 6.4 minutes with PHENIX 2.2.1 and 11.3 with 1.21.2). Tell valdo where the
+  program is installed with one line in `valdo.yaml` (see
+  [Refinement programs](#refinement-programs)); twinned crystals can be refined as twinned
+  (see [Twinned crystals](#twinned-crystals)).
 - **`existing`**: you refined every dataset already; point `--existing` at the refined MTZs
   (`'/path/{name}/final.mtz'`). The column names are detected.
 
@@ -161,6 +168,153 @@ I 41, for example, gemmi's -x,y,-z becomes y,x,-z). Where every choice would nee
 an origin shift (e.g. P 21 21 21 with a = b), the dataset is dropped with that reason;
 use `phases.source: refine` for such a screen. The single apo model (`models.apo`) is assumed
 to be in the reference's setting and is never converted.
+
+## Refinement programs
+
+With `phases.source: refine`, valdo needs PHENIX (`phenix.refine`) or CCP4 (`dimple`). Tell
+valdo once where the program is installed, in part 1 of `valdo.yaml`:
+
+```yaml
+programs:
+  phenix: /path/to/phenix-2.2-6143    # used with phases.program: phenix
+  ccp4: /path/to/ccp4-9               # used with phases.program: dimple
+```
+
+That one line is enough for the whole pipeline: `valdo check` tests that installation, the
+refine stage of `valdo run` uses it (on your computer or in a batch job), and the script from
+`valdo jobscript` needs no setup line for it. `valdo init` takes the same with `--phenix PATH`
+or `--ccp4 PATH`; without them, it looks for the program on PATH and, if that installation has
+its setup script, writes its folder for you (with the comment "found on PATH by valdo init").
+`valdo init --force` keeps the `programs` settings of the `valdo.yaml` it replaces unless they are
+given again (it does not keep `phases.twin_law`, and says so). The separate upstream commands
+`valdo.refine` and `valdo.occupancy` (which runs `phenix.maps`) do not read `valdo.yaml`: before
+using them, set up PHENIX in your shell (`source /path/to/phenix-2.2-6143/phenix_env.sh`).
+
+- **What to give:** the installation folder (PHENIX: the folder with `phenix_env.sh`, e.g.
+  `phenix-2.2-6143`; CCP4: the folder with `bin/ccp4.setup-sh`, e.g. `ccp4-9`), or the setup
+  script itself, its `bin` folder or the program. A pasted setup line also works
+  (`phenix: source /opt/phenix-2.2-6143/phenix_env.sh` is read as the script's path). Relative
+  paths are relative to `valdo.yaml`; `~` works. csh scripts (`ccp4.setup-csh`,
+  `phenix_env.csh`) cannot be used. On a cluster, use a folder the compute nodes can see (your
+  home or a lab folder), not one on your laptop.
+- **How it works:** for the refine stage, valdo sources the installation's own setup script
+  (`phenix_env.sh`, `bin/ccp4.setup-sh`) in a separate `bash` (without your profile or rc
+  files), reads back the environment that script makes, and runs the program with it. Your
+  shell, the batch job and valdo's own Python are not changed, and valdo's Python settings
+  (`PYTHONPATH`, `PYTHONHOME`) are not passed to PHENIX or CCP4. Sourcing a script runs it:
+  point these settings only at installations you trust (your own or your lab's).
+- **Without the setting** (`null`, the default) the program must be on PATH, as before: set up
+  PHENIX or CCP4 in your shell and in the job script (`valdo jobscript --env-setup '...'`).
+- **Which version ran:** `valdo check` names the program, version and folder
+  (`refine_program`); every refinement records it (`program_version` in
+  `04_refine/refine_summary.csv`, and the first lines of each `04_refine/runs/<stem>/refine.log`),
+  and so does the report (with the number of refined variants per version when there are
+  several). If the version set up now differs from the one that made the existing refinements
+  (moving the same version to another folder is no change), `valdo check` and `valdo status`
+  say so (`program_changed`): datasets that were already refined are not refined again just
+  because of that. To refine every dataset with the new version, delete
+  `<workdir>/04_refine/runs` and run `valdo run --from refine`.
+- **What valdo gives phenix.refine** (tested with PHENIX 1.21.2-5419 and 2.2.1-6174): the model,
+  the MTZ, `output.prefix`, the `.eff`, the data columns as `miller_array.labels.name=F-obs,SIGF-obs`
+  (PHENIX 1.20 and later ignore `xray_data.labels`; with an MTZ that also holds intensities,
+  PHENIX would otherwise refine against those), `xray_data.r_free_flags.generate=True` when the
+  MTZ has no R-free flags (or `miller_array.labels.name=<flags>` when it has several flag columns),
+  `xray_data.r_free_flags.ignore_pdb_hexdigest=True`, the twin law, your `extra_args`, and
+  `--overwrite` last (PHENIX 1.x rejects parameters after it). `ignore_pdb_hexdigest`: a start
+  model that PHENIX refined before against another R-free set (every PanDDA input model, for
+  example) carries a hexdigest of that set, and PHENIX stops at the mismatch unless told to
+  ignore it, which is what dimple does without asking. The R-free set is then this dataset's
+  own (or a new one), not the one the start model was refined against. A setting you give in
+  `extra_args` (labels, `ignore_pdb_hexdigest`) replaces valdo's.
+- **The packaged `.eff`:** upstream's `refine_drug.eff` names an R-free file on the authors'
+  cluster, sets `output.quiet` (not a phenix.refine parameter) and never closes its `refine {`
+  scope, so PHENIX did not read it at all. valdo writes a repaired copy to
+  `04_refine/phenix_refine.eff` (those three lines fixed; the log of the refine stage says so)
+  and leaves the upstream file unchanged. With `advanced.refine.eff` set to your own file,
+  valdo uses that as it is (it stops only if its braces do not balance).
+- **Installing:** valdo installs neither program. PHENIX needs a licence (free for academic
+  users, phenix-online.org); CCP4 is free for academic use (ccp4.ac.uk). Install them yourself
+  or ask your lab or cluster administrators, then give valdo the folder.
+
+## Twinned crystals
+
+In some lattices (for example P 31 2 1, P 3, P 4, or P 21 21 21 with a close to b) a crystal can
+be twinned: two orientations of the lattice overlap, related by a *twin law* written in hkl
+notation (e.g. `-h,-k,l`). The twin fraction is the share of the second orientation (0 =
+untwinned, 0.5 = perfect twin). With `phases.source: refine`, valdo can refine every dataset as
+twinned:
+
+```yaml
+phases:
+  source: refine
+  program: dimple        # or phenix
+  twin_law: -h,-k,l
+```
+
+(`valdo init DATA --apo apo.pdb --phases refine --program dimple --twin-law -h,-k,l`;
+`--twin-law=-h,-k,l` works too.) `twin_law: auto` stands for the only twin law the reference
+lattice allows, when it allows exactly one (e.g. P 31 2 1, P 3 2 1, P 31 1 2, P 41, P 61):
+`valdo check` and `valdo init` say which law that is. They refuse `auto` when the lattice allows
+none (e.g. P 41 21 2, P 61 2 2, P 21 21 21 with three different cell edges) or several (P 3, P 31,
+P 32, pseudo-cubic cells); then give the law itself.
+
+- **Which law:** `valdo check` lists the twin laws the reference dataset's space group and cell
+  allow (finding `twin_law`; in `valdo check --json`: `inputs.twin.possible`), and `valdo init`
+  writes them in the comment of `phases.twin_law`. Whether your crystals are twinned (and by
+  how much) is best judged with the usual tools (phenix.xtriage, ctruncate). A law that is a
+  symmetry operation of the crystal, or that the lattice does not allow, is an error. Laws that
+  differ only by a symmetry operation are the same twin law: in P 31 2 1, REFMAC writes
+  `-h,-k,l` as `-K, -H, -L`. The law is written in the reference dataset's indexing. Every
+  indexing variant of a dataset is refined; in a variant re-indexed by an operator that does
+  not commute with the law (only lattices with several twin laws, e.g. pseudo-cubic cells), the
+  same twinning has another law there, and valdo refines that one (`twin_law` in
+  `04_refine/refine_summary.csv` shows it).
+- **phenix:** `xray_data.twin_law=<law>` is added to every `phenix.refine` run, which refines
+  that law's twin fraction (a bare `twin_law=` is ambiguous to PHENIX, which also has
+  `neutron_data.twin_law`). phenix.refine keeps the law for every dataset; an untwinned one
+  refines to a twin fraction near 0 (an exact 0 is counted in the refine stage's message and the
+  report). Checked with PHENIX 1.21.2 and 2.2.1 on 48 synthetic twinned datasets (twin fractions
+  0-0.49): every refined fraction was within 0.008 of the true one, and R-free was 0.08-0.09
+  whatever the twin fraction (without the twin law it rose from 0.08 to 0.28; on the untwinned
+  ones, below 0.05, it was 0.090 with the law against 0.080 without). PHENIX's twin-refined
+  map coefficients can be missing for part of the reflections (there: 81-91 % of the
+  reflections had them in 8 of the 48 datasets, twin fractions 0.33-0.43; all of them without
+  twin refinement); valdo flags such datasets `low_phase_coverage`.
+- **dimple:** dimple has no twin-law option. valdo passes `--refmac-key twin`, which dimple
+  gives to its jelly-body and final restrained REFMAC runs (not to the rigid-body run or to
+  molecular replacement). REFMAC then finds the twin laws itself, keeps those with a twin
+  fraction of at least 0.07 and refines their fractions; valdo compares the law(s) REFMAC kept
+  with `phases.twin_law`. A dataset for which REFMAC kept no twin domain was refined as
+  untwinned (`twin_fraction` 0, with a note).
+- **Results:** `twin_law`, `twin_fraction` and `twin_note` per dataset in `datasets.csv` (for
+  the kept indexing variant) and in `04_refine/refine_summary.csv` (every variant); the
+  report's "Refinement" section gives the median and range. A law other than the configured
+  one, or several laws, are noted in `twin_note`. The twin fraction is read from the refined
+  model (REFMAC: REMARK 3 "TWIN DETAILS" and the mmCIF; phenix.refine: REMARK 3 "TWINNING
+  INFORMATION", the mmCIF `_pdbx_reflns_twin` items, else the last `twin_fraction=` line of its
+  log). Twin laws in `advanced.refine.extra_args` are refused: set `phases.twin_law`, so that
+  valdo also handles the indexing check and the twin fraction.
+- **Which indexing variant is kept:** with twin refinement, both indexings of a dataset fit
+  about equally well (the twin fraction becomes 1 - f in the other one), so R-free cannot
+  choose between them. When a dataset has two variants, the filter keeps the one with the lower
+  twin fraction (lower by at least 0.1), otherwise the one that correlates best with the
+  reference.
+- **What it does not do:** only the phases and refined models come from twin refinement. The
+  amplitudes the VAE learns from are the measured, twinned ones (valdo does no detwinning and
+  no intensity conversion), so strongly twinned datasets still correlate less well with the
+  reference (and may be dropped by filter), and a ligand bound in one domain looks weaker.
+
+Without `phases.twin_law` (the default), refinement and every result are exactly as before.
+Twinned datasets refined that way can fit valdo's check of the refined MTZ's indexing under
+two operators (their amplitudes look alike under the twin law). With dimple, which can
+re-index the data, such a dataset is dropped at refine with "could not relate the refined MTZ
+to the input data ...; both indexings fit, as for twinned data" (seen at a twin fraction of
+0.25). phenix.refine never re-indexes, so its result is kept in the input indexing and its
+`reason` in `04_refine/refine_summary.csv` carries the same hint (seen on one of 39 PTP1B
+datasets, CC 0.921 under -h,-k,l, with PHENIX 1.21.2 and 2.2.1; and on synthetic data with twin
+fractions above 0.27, where R-free without the twin law rose to 0.28). `valdo run` counts these
+datasets in either case. Twin refinement avoids this, because the indexing is then taken from
+the program itself.
 
 ## Reading the report
 
@@ -209,7 +363,9 @@ Known limitations:
 - **Few datasets.** The VAE needs many datasets to learn the unbound crystal; below about 100
   usable datasets `valdo check` warns that rankings are less reliable.
 - **Twinning.** Twinned datasets correlate worse with the reference, may be reindexed
-  inconsistently and are often dropped by filter. VALDO does no twin refinement; check
+  inconsistently and are often dropped by filter. With `phases.source: refine`, valdo can
+  refine them as twinned (`phases.twin_law`, see [Twinned crystals](#twinned-crystals)), which
+  improves their phases; the amplitudes the VAE compares stay twinned, so check strongly
   twinned datasets separately.
 - **One crystal form per project.** Datasets in another space group or with a very different
   cell are excluded or dropped; run them as a separate project.

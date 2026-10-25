@@ -54,6 +54,14 @@ root of the valdo repository; human docs: `docs/easy/`.
   `missing_models`, `fallback_models`, `missing_input_phases`, `few_datasets`, and about the reference,
   reindexing, `phases.source` and the focal residue;
 - before changing anything under `advanced:` in `valdo.yaml`, or using PHENIX (licence);
+- for the PHENIX/CCP4 installation folder when `valdo check` reports `refine_program_missing`,
+  `program_not_found` or `program_setup_failed`: set `programs.phenix` / `programs.ccp4` in
+  `valdo.yaml` to the folder they name (one line covers every command and batch job). Do not
+  search the disk for installations. Never install PHENIX or CCP4 or accept a licence for them;
+- before twin refinement (`phases.twin_law`): offer the laws in `valdo check --json`
+  `inputs.twin.possible`; the human decides whether the crystals are twinned. Set the law they
+  choose (`--twin-law -h,-k,l`; `auto` = the lattice's only law), never in
+  `advanced.refine.extra_args`;
 - for the scientific verdict: a blob means "something changed here", not "a ligand"; the
   human judges the maps (`report/view_top_hits.py` for Coot, `.pml` for PyMOL).
 

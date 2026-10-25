@@ -56,6 +56,10 @@ def write_dataset(path, cell, sg, dmin=3.0, seed=0, free="phenix", extra_pair=Fa
     elif free == "single":
         cols["R-free-flags"] = np.zeros(n, dtype=np.int32)
         types["R-free-flags"] = "MTZInt"
+    elif free == "both":     # two R-free columns (PHENIX's and CCP4's convention)
+        cols["R-free-flags"] = (rng.random(n) < 0.1).astype(np.int32)
+        cols["FreeR_flag"] = rng.integers(0, 20, n).astype(np.int32)
+        types.update({"R-free-flags": "MTZInt", "FreeR_flag": "MTZInt"})
     if extra_pair:
         cols["FP"] = F * 1.01
         cols["SIGFP"] = 0.05 * F + 1.0
@@ -667,6 +671,66 @@ def test_foreign_run_folder_is_not_deleted(tmp_path, fakes):
     assert (out / "runs" / "0001_0" / "precious.txt").read_text() == "keep me"
 
 
+def test_phenix_command_with_two_free_columns_and_user_labels(tmp_path, fakes):
+    jobs = _jobs(tmp_path, [("0001_0", dict(free="both"))])
+    out = tmp_path / "04_refine"
+    table = refine.refine_datasets(jobs, "phenix", str(out), log=quiet)
+    assert table["status"].tolist() == ["ok"]
+    argv = fakes.calls()[-1]["argv"]
+    # several R-free columns: the one valdo chose is named too (PHENIX would stop at the choice)
+    assert [a for a in argv if a.startswith("miller_array.labels.name=")] == [
+        "miller_array.labels.name=F-obs,SIGF-obs", "miller_array.labels.name=R-free-flags"]
+    # labels or the hexdigest setting given by the user are not given twice
+    refine.refine_datasets(jobs, "phenix", str(tmp_path / "mine"), log=quiet,
+                           extra_args=["miller_array.labels.name=F-obs,SIGF-obs",
+                                       "xray_data.r_free_flags.ignore_pdb_hexdigest=False"])
+    argv = fakes.calls()[-1]["argv"]
+    assert sum(a.startswith("miller_array.labels.name=") for a in argv) == 1
+    assert [a for a in argv if "ignore_pdb_hexdigest" in a] == ["xray_data.r_free_flags.ignore_pdb_hexdigest=False"]
+    assert argv[-1] == "--overwrite"
+
+
+def test_phenix_identity_rule():
+    """Found on Wynton with real phenix.refine 1.21.2 and 2.2.1 (no twin law): PTP1B dataset 0006 of the
+    40-dataset validation project failed the frame check with 'x,y,z: 1.000, -x,-y,z: 0.921' (its own,
+    mildly twinned amplitudes fit the twin law too), while dimple kept it. phenix.refine never re-indexes."""
+    assert refine._phenix_identity({"x,y,z": 1.0, "-x,-y,z": 0.921}) == {"-x,-y,z": 0.921}
+    assert refine._phenix_identity({"x,y,z": 0.95, "-x,-y,z": 0.40}) == {}
+    # a twin-law CC below 0.9 that still blocks the 0.1 margin is reported (and so gets the twin hint)
+    assert refine._phenix_identity({"x,y,z": 0.95, "-x,-y,z": 0.86}) == {"-x,-y,z": 0.86}
+    assert refine._phenix_identity({"x,y,z": 0.85, "-x,-y,z": 0.20}) is None             # below the floor
+    assert refine._phenix_identity({"x,y,z": 0.93, "-x,-y,z": 0.97}) is None             # another one fits better
+    assert refine._phenix_identity({"x,y,z": float("nan"), "-x,-y,z": 0.99}) is None
+    assert refine._phenix_identity({}) is None
+
+
+def _twin_amplitudes(path, fraction):
+    """Rewrite F-obs of an MTZ as merohedrally twinned data (twin law -h,-k,l, intensities mixed)."""
+    ds = rs.read_mtz(str(path))
+    mate = ds.apply_symop(gemmi.Op("-x,-y,z")).hkl_to_asu()[["F-obs"]].rename(columns={"F-obs": "F_mate"})
+    ds = ds.join(mate, how="inner")
+    f1, f2 = ds["F-obs"].to_numpy(dtype=float), ds["F_mate"].to_numpy(dtype=float)
+    ds["F-obs"] = rs.DataSeries(np.sqrt((1 - fraction) * f1 ** 2 + fraction * f2 ** 2), index=ds.index,
+                                dtype="SFAmplitude")
+    ds.drop(columns=["F_mate"]).write_mtz(str(path))
+
+
+def test_phenix_keeps_the_input_indexing_of_twinned_data(tmp_path, fakes):
+    jobs = _jobs(tmp_path, [("0001_0", dict(free=None)), ("0002_0", dict(free=None))])
+    for job in jobs:
+        _twin_amplitudes(job["mtz"], 0.42)
+    op, cc, ccs = refine.find_frame_op(jobs[0]["mtz"], jobs[0]["mtz"], "F-obs")
+    assert op is None and ccs["x,y,z"] > 0.999 and 0.9 < ccs["-x,-y,z"] < 0.999   # ambiguous by the margin rule
+    table = refine.refine_datasets(jobs[:1], "phenix", str(tmp_path / "phx"), ncpu=1, log=quiet).set_index("stem")
+    row = table.loc["0001_0"]
+    assert row["status"] == "ok" and row["reindex_op"] == "" and refine.TWIN_HINT in row["reason"]
+    assert "phenix.refine keeps the input indexing (x,y,z, CC 1.000)" in row["reason"]
+    assert (tmp_path / "phx" / "phases" / "0001_0.mtz").is_file()
+    # dimple can re-index (pointless), so the same data still fail its frame check
+    table = refine.refine_datasets(jobs[1:], "dimple", str(tmp_path / "dim"), ncpu=1, log=quiet).set_index("stem")
+    assert table.loc["0002_0", "status"] == "failed" and refine.TWIN_HINT in table.loc["0002_0", "reason"]
+
+
 def test_phenix_end_to_end(tmp_path, fakes):
     jobs = _jobs(tmp_path, [("0001_0", dict(free=None)), ("0002_0", dict(free="phenix", extra_pair=True))])
     out = tmp_path / "04_refine"
@@ -679,12 +743,19 @@ def test_phenix_end_to_end(tmp_path, fakes):
     assert eff.is_file() and "/n/holyscratch01" not in eff.read_text()
     calls = {c["stem"]: c for c in fakes.calls()}
     a1 = calls["0001_0"]["argv"]
-    assert a1[:5] == [jobs[0]["pdb"], jobs[0]["mtz"], "output.prefix=refine_0001_0", str(eff), "--overwrite"]
+    # PHENIX 1.21 and 2.2: data labels with miller_array.labels.name (always: an MTZ can hold intensities
+    # too, which PHENIX would prefer), the start model's R-free hexdigest ignored, '--overwrite' last
+    # (PHENIX 1.x, Python 2.7 argparse, rejects parameters after an option)
+    assert a1[:5] == [jobs[0]["pdb"], jobs[0]["mtz"], "output.prefix=refine_0001_0", str(eff),
+                      "miller_array.labels.name=F-obs,SIGF-obs"]
     assert "xray_data.r_free_flags.generate=True" in a1 and not any(a.startswith("xray_data.labels") for a in a1)
-    assert a1[-1] == "main.number_of_macro_cycles=1"
+    assert "xray_data.r_free_flags.ignore_pdb_hexdigest=True" in a1
+    assert a1[-2:] == ["main.number_of_macro_cycles=1", "--overwrite"]
+    assert [a for a in a1[1:] if a.startswith("-")] == ["--overwrite"]
     assert calls["0001_0"]["cwd"] == str(out / "runs" / "0001_0")
     a2 = calls["0002_0"]["argv"]
-    assert "xray_data.labels=F-obs,SIGF-obs" in a2 and not any("r_free_flags" in a for a in a2)
+    assert [a for a in a2 if a.startswith("miller_array.labels.name=")] == ["miller_array.labels.name=F-obs,SIGF-obs"]
+    assert not any("r_free_flags.generate" in a or "r_free_flags.label" in a for a in a2)
     for stem in ("0001_0", "0002_0"):
         cols = refine.inspect_mtz(str(out / "phases" / f"{stem}.mtz"))["columns"]
         assert {"2FOFCWT", "PH2FOFCWT", "FOFCWT", "PHFOFCWT"} <= set(cols)

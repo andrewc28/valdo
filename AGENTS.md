@@ -43,11 +43,11 @@ Command-specific keys:
 |---|---|
 | `version` | `version`, `upstream_version`, `upstream_base` |
 | `init` | `project_file`, `n_datasets`, `decisions[{setting, value, why}]`, `summary`, `warnings` |
-| `check` | `project_file`, `errors`, `warnings` (counts), `findings[{level, code, title, what, why, fix, items}]`, `environment`, `inputs`, `notes` |
+| `check` | `project_file`, `errors`, `warnings` (counts), `findings[{level, code, title, what, why, fix, items}]`, `environment` (with `refine_program`: the refinement program, version and folder, or its `error`), `inputs` (with `twin`: `possible` twin laws of the reference lattice, `configured`, `ok`), `notes` |
 | `run` | `project_file`, `workdir`, `dry_run`, `plan[{stage, number, action, reason}]`, `stages[{stage, status, seconds, counts}]`, `datasets{total, ok, dropped}`, `report` (path of report.html or null) |
-| `status` | `project_file`, `workdir`, `has_state`, `stages[{stage, number, folder, status, applicable, stale, next_action, reason, seconds, counts, log, error}]`, `datasets{total, ok, dropped, dropped_by_stage}`, `lock`, `last_run`; while a run is active also `wait{reason, poll, seconds}` (poll `valdo status` about every `seconds`; `next` is then `["valdo status"]`) |
+| `status` | `project_file`, `workdir`, `has_state`, `stages[{stage, number, folder, status, applicable, stale, next_action, reason, seconds, counts, log, error}]`, `datasets{total, ok, dropped, dropped_by_stage}`, `lock`, `last_run`, `refine_program` (program, version and folder the refine stage used, or null), `warnings`; while a run is active also `wait{reason, poll, seconds}` (poll `valdo status` about every `seconds`; `next` is then `["valdo status"]`) |
 | `report` | `workdir`, `report_dir`, `result{counts, funnel, top_hits[], validation, files, warnings, ...}` |
-| `jobscript` | `scheduler`, `path`, `script`, `slots`, `hours` (wall-clock limit written into the script), `hours_why` (estimated from the number of datasets unless `--hours` was given) |
+| `jobscript` | `scheduler`, `path`, `script`, `slots`, `hours` (wall-clock limit written into the script), `hours_why` (estimated from the number of datasets unless `--hours` was given), `notes` (comments written into the script, e.g. where the refinement program comes from), `warnings` |
 | `stages` | `stages[{name, number, folder, upstream, runs_when, description}]` |
 
 Plan actions: `run`, `skip` (up to date), `keep`, `missing`, `later`, `not_applicable`.
@@ -64,6 +64,21 @@ Plan actions: `run`, `skip` (up to date), `keep`, `missing`, `later`, `not_appli
   focal residue. Report them; do not silently change settings to make warnings disappear.
 - **Changing anything under `advanced:`** in `valdo.yaml` (validated PTP1B settings), or
   using PHENIX (licence) instead of dimple.
+- **Where PHENIX or CCP4 is installed.** With `phases.source: refine`, valdo needs
+  `programs.phenix` or `programs.ccp4` in `valdo.yaml` (the installation folder; one line covers
+  every command and batch job) unless the program is on PATH. If `valdo check` reports
+  `refine_program_missing`, `program_not_found` or `program_setup_failed`, ask the human for the
+  installation folder (or their lab's) and set it. Do not search the disk for installations
+  (no `find /`); `valdo init` already looks on PATH, and a folder that holds several
+  installations is listed in the error. Never install PHENIX or CCP4 yourself, and never accept
+  a licence for the human; valdo sources the installation's setup script, so only use
+  installations the human names.
+- **Twin refinement** (`phases.twin_law`): whether the crystals are twinned is the human's
+  call. Offer the laws `valdo check --json` lists in `inputs.twin.possible` (the `twin_law`
+  finding), and set the law the human chooses (`--twin-law -h,-k,l` or `--twin-law=-h,-k,l`);
+  `auto` only when the human agrees to twin refinement and the lattice has exactly one law
+  (`twin_law_ambiguous` otherwise). Do not invent one, and never put a twin law into
+  `advanced.refine.extra_args`.
 - **Interpreting hits.** A blob means "something changed here", not "a ligand". Present the
   top hits with their flags; the human judges the maps.
 

@@ -144,19 +144,49 @@ reconstructed on a GPU, or retrained on the CPU (`valdo run --from train`).
 
 ## 5. Refinement on Wynton
 
-Only needed with `phases.source: refine`.
+Only needed with `phases.source: refine`. Install the program once in your home (or use your
+lab's installation), then give its folder in `valdo.yaml`; that one line is enough for
+`valdo check`, `valdo run` and the batch job (valdo sources the setup script itself, see
+[USER_GUIDE.md](USER_GUIDE.md#refinement-programs)):
 
-- **CCP4 / dimple**: install CCP4 (ccp4.ac.uk) in your home and add its setup line to the job
-  script, e.g. `--env-setup "source ~/ccp4-9/bin/ccp4.setup-sh"`. A line without the word
-  `activate` is added after the activation of the environment you run `valdo jobscript` in; a
-  line with `activate` replaces that automatic activation (then give your conda lines too, as in
-  section 3). The tests used CCP4 9 (dimple 2.7): about one minute per PTP1B dataset per core.
-  `valdo check` reports `refine_program_missing` if dimple is not found in the shell where you run
-  it; run `valdo check` after sourcing the same setup line.
-- **PHENIX**: valdo-easy can run `phenix.refine` (with the packaged `refine_drug.eff`, like
-  upstream `valdo.refine`), but PHENIX is not provided: it needs your own licence and
-  installation. Source PHENIX's `phenix_env.sh` in the job script. This path was only tested
-  with a stand-in program, so look at the first datasets' logs in `04_refine/runs/` early.
+```yaml
+programs:
+  ccp4: ~/ccp4-9                  # for phases.program: dimple
+  phenix: ~/phenix-2.2.1-6174     # for phases.program: phenix
+```
+
+(or `valdo init ... --ccp4 ~/ccp4-9`). No `--env-setup` line is needed for them, and
+`valdo check` on the login node already tests the installation the job will use.
+
+- **CCP4 / dimple**: install CCP4 (ccp4.ac.uk) in your home. The tests used CCP4 9 (dimple
+  2.7): about one minute per PTP1B dataset per core. `valdo check` reports
+  `refine_program_missing` if `programs.ccp4` is not set and dimple is not on PATH, and
+  `program_not_found` / `program_setup_failed` if the folder is wrong.
+- **PHENIX**: PHENIX is not a Wynton module, and valdo does not provide it: it needs a licence
+  (free for academic users, phenix-online.org). Download the Linux installer there under your
+  licence, copy it to Wynton, and install into a folder of your home (or your lab's folder)
+  whose path has no spaces, for example
+
+  ```bash
+  bash Phenix-2.2.1-6174-Linux-x86_64.sh -b -p ~/phenix-2.2.1-6174
+  ```
+
+  then set `programs.phenix: ~/phenix-2.2.1-6174`. Run the installer as a batch job with a long
+  time limit (e.g. `-l h_rt=12:00:00`), not on a login node: Wynton's network file systems make
+  it slow (PHENIX 1.21.2 took 100 minutes into `/wynton/scratch`; PHENIX 2.2.1, about 420,000
+  files, did not finish within 3 hours straight into a home folder). `/wynton/scratch` is purged
+  after two weeks, so it is no place for an installation. Tested: phenix.refine 1.21.2-5419 and
+  2.2.1-6174 through valdo with the packaged `.eff`: about 4 to 12 minutes per dataset per core
+  in batch runs (median 6.4 minutes with 2.2.1 and 11.3 with 1.21.2, 39 PTP1B datasets refined
+  16 at a time).
+  Look at the first datasets' logs in `04_refine/runs/` early.
+- **Without `programs.*`** you can still set the program up in the job script, as before:
+  `--env-setup "source ~/ccp4-9/bin/ccp4.setup-sh"`. A line without the word `activate` is
+  added after the activation of the environment you run `valdo jobscript` in; a line with
+  `activate` replaces that automatic activation (then give your conda lines too, as in
+  section 3). Run `valdo check` after sourcing the same line.
+- **Twinned crystals**: set `phases.twin_law` to the law (or `auto`; see
+  [USER_GUIDE.md](USER_GUIDE.md#twinned-crystals)).
 
 ## 6. Good practice on a shared cluster
 

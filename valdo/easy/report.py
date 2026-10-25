@@ -142,7 +142,7 @@ def build_report(workdir, top_n=20, rank_by=None, known_bound_dir=None, ligand_r
     Returns
     -------
     dict with keys schema, ok, workdir, report_dir, files, counts, rank_by,
-    funnel, top_hits, validation (or None), warnings.
+    funnel, refinement (or None), top_hits, validation (or None), warnings.
     """
     workdir = os.path.abspath(os.path.expanduser(workdir))
     if not os.path.isdir(workdir):
@@ -185,6 +185,7 @@ def build_report(workdir, top_n=20, rank_by=None, known_bound_dir=None, ligand_r
     stages = _stage_rows(ctx["state"])
     settings = _settings(ctx)
     counts = _counts(datasets, ctx, ranked)
+    refinement = _refinement(ctx, datasets)
 
     files = {
         "html": os.path.join(report_dir, "report.html"),
@@ -217,6 +218,7 @@ def build_report(workdir, top_n=20, rank_by=None, known_bound_dir=None, ligand_r
         "counts": counts,
         "rank_by": rank_by,
         "funnel": funnel,
+        "refinement": refinement,
         "top_hits": [_public_hit(h) for h in top_hits],
         "top_hits_symmetry_copies_left_out": copies_skipped,
         "validation": validation,
@@ -446,6 +448,9 @@ def _blobs_csv_table(ranked):
 
 def _dataset_table(datasets, ranked):
     base_cols = ["id", "original_name", "status", "dropped_stage", "dropped_reason", "flags", "variant"]
+    if datasets is not None:   # twin refinement: the kept variant's twin law and fraction
+        base_cols += [c for c in ("twin_law", "twin_fraction", "twin_note")
+                      if c in datasets and (datasets[c].astype(str) != "").any()]
     if datasets is not None:
         table = datasets[[c for c in base_cols if c in datasets]].copy()
     else:
@@ -612,6 +617,71 @@ def _stage_rows(state):
                      "n_in": n_in, "n_out": n_out})
     rows.sort(key=lambda r: STAGE_ORDER.index(r["stage"]) if r["stage"] in STAGE_ORDER else 99)
     return rows
+
+
+def _refinement(ctx, datasets):
+    """Which program refined the datasets (and with which twin law), from the refine stage's record."""
+    st = ((ctx.get("state") or {}).get("stages") or {}).get("refine") or {}
+    if st.get("status") != "done":
+        return None
+    out = st.get("outputs") or {}
+    prog = out.get("program") or {}
+    res = {"program": prog.get("program"), "version": prog.get("version"),
+           "location": prog.get("root") if prog.get("source") == "valdo.yaml" else prog.get("exe"),
+           "source": prog.get("source"), "setting": prog.get("setting"), "twin_law": out.get("twin_law"),
+           "twin": None, "versions": {}}
+    if ctx.get("workdir"):
+        from valdo.easy.check import recorded_versions
+        res["versions"] = recorded_versions(ctx["workdir"])   # {version: refined variants}
+    if out.get("twin_law") and datasets is not None and "twin_fraction" in datasets:
+        ok = datasets[datasets["status"] == "ok"]
+        all_vals = pd.to_numeric(ok["twin_fraction"], errors="coerce")
+        vals = all_vals.dropna()
+        notes = ok["twin_note"].astype(str) if "twin_note" in ok else pd.Series([], dtype=str)
+        res["twin"] = {"n": int(len(vals)), "n_missing": int(all_vals.isna().sum()),
+                       "median": round(float(vals.median()), 4) if len(vals) else None,
+                       "min": round(float(vals.min()), 4) if len(vals) else None,
+                       "max": round(float(vals.max()), 4) if len(vals) else None,
+                       "n_untwinned": int((vals == 0).sum()),
+                       "n_above_half": int((vals > 0.5).sum()),
+                       "n_with_note": int((notes != "").sum())}
+    return res
+
+
+def _refinement_lines(ref):
+    """Plain-text lines for the report's refinement section."""
+    if not ref:
+        return []
+    name = {"phenix": "phenix.refine (PHENIX)", "dimple": "dimple (CCP4)"}.get(ref.get("program"), ref.get("program"))
+    where = ref.get("location") or "?"
+    origin = (f"{ref.get('setting')} in valdo.yaml" if ref.get("source") == "valdo.yaml" else
+              ("found on PATH" if ref.get("source") else "recorded before valdo-easy noted the program"))
+    lines = [f"Program: {name}" + (f" {ref['version']}" if ref.get("version") else "") + f" at {where} ({origin})"]
+    versions = ref.get("versions") or {}
+    if len(versions) > 1 or (versions and ref.get("version") and set(versions) != {ref["version"]}):
+        lines.append("Refined variants by program version: "
+                     + ", ".join(f"{v}: {n}" for v, n in sorted(versions.items()))
+                     + " (datasets refined by an earlier run were not refined again; 'valdo check' says how to "
+                       "refine them all with one version).")
+    if ref.get("twin_law"):
+        t = ref.get("twin") or {}
+        text = f"Twin refinement with twin law {ref['twin_law']}"
+        if t.get("n"):
+            text += (f": twin fraction median {t['median']:.3f} (range {t['min']:.3f}-{t['max']:.3f}) over "
+                     f"{t['n']} datasets")
+            if t.get("n_untwinned"):
+                from valdo.easy.twin import zero_fraction_text
+                text += f"; {zero_fraction_text(ref.get('program'), t['n_untwinned'])}"
+            if t.get("n_above_half"):
+                text += (f"; {t['n_above_half']} above 0.5 (the model and phases follow the smaller twin "
+                         "domain there)")
+        if t.get("n_missing"):
+            text += (f"{';' if t.get('n') else ':'} twin fraction not found for {t['n_missing']} "
+                     f"dataset{'s' if t['n_missing'] != 1 else ''} (datasets.csv twin_note says why)")
+        lines.append(text + ". Per dataset: datasets.csv (twin_law, twin_fraction, twin_note).")
+    else:
+        lines.append("No twin refinement (phases.twin_law is null).")
+    return lines
 
 
 def _first(d, keys):
@@ -1374,6 +1444,8 @@ def _render_markdown(r):
     if r["warnings"]:
         out += ["## Warnings", ""] + [f"- {w}" for w in r["warnings"]] + [""]
     out += ["## Read this first", ""] + [f"- {cv}" for cv in CAVEATS] + [""]
+    if r.get("refinement"):
+        out += ["## Refinement", ""] + [f"- {line}" for line in _refinement_lines(r["refinement"])] + [""]
     if r["funnel"]:
         out += ["## Dataset funnel", "", "| Stage | Datasets | Dropped here |", "|---|---:|---:|"]
         for f in r["funnel"]:
@@ -1491,6 +1563,9 @@ def _render_html(r, qc, ranked):
             f"<li>{e(w)}</li>" for w in r["warnings"]) + "</ul></div>")
     parts.append("<div class='note'><b>Read this first.</b><ul>" + "".join(
         f"<li>{e(cv)}</li>" for cv in CAVEATS) + "</ul></div>")
+    if r.get("refinement"):
+        parts.append("<h2>Refinement</h2><ul>" + "".join(
+            f"<li>{e(line)}</li>" for line in _refinement_lines(r["refinement"])) + "</ul>")
 
     if r["funnel"]:
         n0 = max(f["count"] for f in r["funnel"]) or 1

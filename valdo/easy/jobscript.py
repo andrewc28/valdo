@@ -29,6 +29,7 @@ often also need ``--partition``/``--account``; placeholders are included).
 import math
 import os
 import shlex
+import textwrap
 
 SCHEDULERS = ("sge", "slurm")
 
@@ -37,11 +38,21 @@ _ENV_PLACEHOLDER = """\
 # (one of these, or whatever your site uses)
 # source /path/to/miniconda3/etc/profile.d/conda.sh && conda activate valdo
 # source /path/to/venv/bin/activate
-# module load ...   # e.g. CCP4/PHENIX, if the refine stage runs here"""
+# (PHENIX/CCP4 for the refine stage need no line here when programs.phenix /
+#  programs.ccp4 is set in valdo.yaml: valdo sets them up itself)"""
+
+
+def _comment_lines(note, width=96):
+    """A note as comment lines: wrapped at spaces only (never inside a path or a word with hyphens);
+    an indented note (e.g. a path on a line of its own) is kept as it is."""
+    text = str(note)
+    if text[:1].isspace():
+        return [text.rstrip()]
+    return textwrap.wrap(text, width, break_long_words=False, break_on_hyphens=False) or [""]
 
 
 def render(scheduler, config_path, slots=16, hours=24, mem_gb=4, gpu=False, env_setup=None, log_dir=None,
-           job_name="valdo"):
+           job_name="valdo", notes=None):
     """Return the text of a batch script that runs ``valdo run -c <config_path>``.
 
     Parameters
@@ -66,6 +77,9 @@ def render(scheduler, config_path, slots=16, hours=24, mem_gb=4, gpu=False, env_
         It must exist before the job starts; ``valdo jobscript`` creates it.
     job_name : str
         Scheduler job name.
+    notes : list of str, optional
+        Lines added as comments after the environment block (e.g. where the refinement program
+        comes from); wrapped at spaces only, and an indented note is kept on a line of its own.
     """
     sched = str(scheduler).strip().lower()
     if sched == "wynton":
@@ -134,6 +148,8 @@ def render(scheduler, config_path, slots=16, hours=24, mem_gb=4, gpu=False, env_
     else:
         lines = env_setup.splitlines() if isinstance(env_setup, str) else [str(x) for x in env_setup]
         env_block = "\n".join(["# --- environment ---"] + lines)
+    for note in notes or []:
+        env_block += "\n" + "\n".join("# " + line for line in _comment_lines(note))
 
     mkdir_note = "" if os.path.isdir(log_dir) else f"# The log directory must exist first:  mkdir -p {_q(log_dir)}\n"
     body = f"""

@@ -22,6 +22,8 @@ _KIND_TEXT = {
     "float": "number", "bool": "true / false", "list_int": "list of whole numbers",
     "list_num": "list of numbers", "list_str": "list of text", "reindex": "auto / true / false",
     "when_opt": "\"all\", \"never\" or a number in [0, 1]",
+    "twin_law": "twin law in hkl notation, e.g. `-h,-k,l`, or `auto`",
+    "program_path": "path (installation folder or its setup script)",
 }
 
 _SECTION_TEXT = {
@@ -91,6 +93,10 @@ def config_reference():
         "  are matched to datasets by name.",
         "- Column \"upstream\" names the field of the upstream stage config (`<workdir>/configs/<stage>.yaml`)",
         "  that the setting fills.",
+        "- `programs.phenix` / `programs.ccp4` name a PHENIX or CCP4 installation. That one line is all",
+        "  valdo needs: for the refine stage it sources the installation's setup script in a separate",
+        "  `bash` and runs the program with that environment, in every command and batch job (see",
+        "  [USER_GUIDE.md](USER_GUIDE.md#refinement-programs)).",
         "",
     ]
     previous = None
@@ -119,10 +125,17 @@ def config_reference():
         "- `advanced.train.include_errors` is false (upstream preprocess cannot run without sigma(F));",
         "- `advanced.reconstruct.repeats` > 1 with `ml_recon: true` (upstream crashes);",
         "- `advanced.reindex.cc_min_dif` <= 0 (upstream writes no files);",
-        "- `advanced.blobs.extrapolate_factors` is empty.",
+        "- `advanced.blobs.extrapolate_factors` is empty;",
+        "- `phases.twin_law` is set but `phases.source` is not `refine`;",
+        "- `advanced.refine.extra_args` asks for twin refinement (`xray_data.twin_law=...` or `twin_law=...`",
+        "  for phenix, `--refmac-key twin` for dimple): set the law in `phases.twin_law` instead, also when",
+        "  `phases.twin_law` is null (only then does valdo check the refined indexing and read the twin",
+        "  fraction the way twinned data need).",
         "",
         "`valdo check` adds checks that need the data (for example: at least one validation dataset",
-        "for the chosen `train_fraction`, and a warning below about 100 datasets).",
+        "for the chosen `train_fraction`, a warning below about 100 datasets, and whether",
+        "`phases.twin_law` is a twin law of the reference dataset's lattice; `auto` is resolved there to",
+        "the only law that lattice allows, and refused when it allows none or several).",
         "",
         "## Environment variables",
         "",

@@ -32,7 +32,7 @@ commands: `valdo init`, `valdo check`, `valdo run`, `valdo status`, `valdo repor
 ## 1. Install (once)
 
 ```bash
-git clone -b valdo-easy <URL of the lab's valdo repository> valdo
+git clone -b valdo-easy https://github.com/andrewc28/valdo.git valdo
 cd valdo
 conda env create -f environment.yml      # creates the environment 'valdo' (a few minutes)
 conda activate valdo

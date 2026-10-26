@@ -117,3 +117,6 @@ First release of valdo-easy, based on upstream VALDO 0.0.6, commit `1ec32c6`
 
 ### Changed
 - `valdo/VERSION` is `0.0.6+easy.1`.
+- `README.md` is valdo-easy's own short README (install, run, links); upstream's README is kept
+  unchanged as `UPSTREAM_README.md`. `docs/easy/QUICKSTART.md` is shortened to the essential
+  steps; the details moved to `docs/easy/USER_GUIDE.md`.

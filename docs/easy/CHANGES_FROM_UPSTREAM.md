@@ -52,7 +52,7 @@ are in `tests/easy/test_core_upstream.py` unless noted.
 | `valdo/commandline/refine.py` | Removed a stray `)` in `output.prefix` (multi-PDB branch). | Every PHENIX output prefix ended in `)`. | `test_refine_output_prefix_has_no_stray_parenthesis` |
 | `setup.py` | Console script `valdo = valdo.easy.cli:main`; `package_data` for `VERSION` and `refine_drug.eff`; `tests` excluded from the packages; `dev` extra (pytest). Upstream console scripts `valdo.pipeline`, `valdo.refine`, `valdo.occupancy` unchanged. | `pip install .` (non-editable) lost the data files; the new command needs an entry point. | `test_setup_declares_console_script_and_package_data` |
 | `MANIFEST.in` | Also includes `valdo/commandline/refine_drug.eff`. | Same as above (source distributions). | same |
-| `README.md` | A short "New here?" section at the very top pointing to the valdo-easy documentation. Upstream text unchanged below it. | Discoverability. | `test_readme_points_new_users_to_the_quickstart` (test_docs.py) |
+| `README.md` | Replaced by valdo-easy's own short README (installation, the `valdo` commands, links to the documentation). Upstream's README is kept unchanged in `UPSTREAM_README.md`, below a two-line note. | Discoverability: the first page shows how to install and run the pipeline. When merging upstream, copy upstream's new `README.md` into `UPSTREAM_README.md`. | `test_readme_points_new_users_to_the_quickstart` (test_docs.py) |
 
 Not changed although known to be broken: `valdo/temp.py` has a syntax error upstream. Nothing
 imports it, so it is left as it is. `valdo/commandline/refine_drug.eff` is not changed either,
@@ -110,6 +110,7 @@ what valdo-easy feeds them and what it does between stages. All of them are reco
 | `valdo/easy/` | The accessibility layer: `cli.py`, `project.py`, `scan.py`, `ids.py`, `check.py`, `hints.py`, `stages.py`, `runner.py`, `refine.py`, `programs.py` (refinement-program installations), `twin.py` (twin laws), `report.py`, `maps.py`, `jobscript.py`, `docgen.py`. |
 | `tests/easy/` | Test suite (unit tests, a synthetic toy screen end to end, the upstream-equivalence test). |
 | `docs/easy/` | QUICKSTART, USER_GUIDE, CONFIG_REFERENCE (generated), TROUBLESHOOTING, WYNTON, DESIGN, this file. |
+| `UPSTREAM_README.md` | Upstream's `README.md` (commit `1ec32c6`), unchanged below a two-line note. |
 | `AGENTS.md`, `integrations/claude-code/skills/valdo/SKILL.md` | Instructions for LLM agents. |
 | `CHANGELOG.md`, `environment.yml` | Release notes; the environment validated on UCSF Wynton. |
 

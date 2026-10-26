@@ -3,8 +3,8 @@
 **For:** crystallographers using VALDO on their own screens who want to understand what it
 does, which choices matter and how to judge the hits.
 **You need first:** a working installation and a first project
-([QUICKSTART.md](QUICKSTART.md)); the terms MTZ, map coefficients, reindexing, VAE, blob and
-z-score are defined there.
+([QUICKSTART.md](QUICKSTART.md)). The terms MTZ, map coefficients, reindexing, VAE, blob and
+z-score are explained in [Words you will meet](#words-you-will-meet).
 
 ## What VALDO does
 
@@ -30,12 +30,62 @@ places where an individual dataset deviates from it.
 `valdo stages` prints the same table with folder names. `reindex` runs only when the crystal
 form allows alternative indexing; `refine` only when `phases.source` is `refine`.
 
+## Words you will meet
+
+- **MTZ file**: the standard file of merged reflection data (one per dataset), with columns
+  such as `F` (structure-factor amplitude) and `SIGF` (its uncertainty).
+- **Map coefficients**: amplitude and phase columns from refinement (for example `2FOFCWT` /
+  `PH2FOFCWT` and `FOFCWT` / `PHFOFCWT`, or `FWT` / `PHWT` and `DELFWT` / `PHDELWT`) from which
+  an electron-density map is computed. VALDO needs phases for every dataset.
+- **Reindexing**: in some crystal forms the same crystal can be indexed in two (or more)
+  equivalent ways. Before comparing datasets, VALDO puts them all in the same indexing as a
+  reference dataset.
+- **VAE (variational autoencoder)**: a small neural network. VALDO trains it on all datasets
+  of the screen so that it learns what a typical (mostly unbound) dataset looks like. For each
+  dataset it then predicts the "expected" amplitudes; the difference between measured and
+  expected amplitudes highlights what is unusual about that dataset.
+- **Blob**: a connected region of strong difference density found in that difference map. A
+  blob means "something changed here". It is not proof of a ligand.
+- **z-score / sigma**: how many standard deviations above the map's average a value is.
+  `peakz` is the blob's highest value in those units.
+
+## Setting up a project
+
+`valdo init DATA` reads only the file headers (1,680 PTP1B files in 8 seconds), writes
+`valdo.yaml` and tells you what it decided and why. `DATA` is a folder with MTZ files, a quoted
+glob (`'/path/*/final.mtz'`) or a `.txt` file listing the paths. The options:
+
+- `--apo FILE`: one model of the unbound protein, used for every dataset. It must be in the
+  same indexing as the reference dataset (by default your first dataset), so the safest choice
+  is the reference dataset's own model.
+- `--models PATTERN`: one model per dataset, for example `--models '/path/models/{name}.pdb'`
+  (`{name}` is replaced by each dataset's name), or simply the folder that holds them. Give
+  `--apo` as well to have a fallback for datasets without their own model (`valdo check` lists
+  datasets that have no model). When the phases come from your data files, each dataset's model
+  should be the one its phases came from: `valdo run` flags datasets whose model does not sit in
+  their map (`model_map_mismatch`; on PTP1B, 6 of the 7 datasets without their own model).
+- `--focal-seqid N`: a residue whose surroundings should not be reported (for PTP1B, the
+  reactive Cys215 always changes, so the PTP1B run used `--focal-seqid 215`).
+- `--bound-models FOLDER`: optional, models of datasets known to have a ligand. The report
+  then says how well VALDO found them (for information only).
+- `--phases`, `--program`, `--ccp4`, `--phenix`, `--existing` and `--twin-law`: see
+  [Choosing where the phases come from](#choosing-where-the-phases-come-from).
+  `valdo init --help` lists the others (`--workdir`, `--reference`, `--ncpu`, ...).
+
+`valdo check` then looks at your computer (packages, CPUs, disk space), your files (readable,
+columns, space group, cell, resolution, a model and phases for every dataset) and your
+settings. Every message says what is wrong, why it matters and how to fix it. **Errors** stop
+`valdo run`; **warnings** do not. `valdo check --deep` also reads all reflection data (slower;
+finds missing values and duplicated reflections). A misspelled setting is an error with a
+suggestion: `advanced.train.epoch: unknown setting. Did you mean 'advanced.train.epochs'?`
+
 ## The project file
 
 `valdo.yaml` holds every setting. `valdo init` writes it with a comment on each line, in
 three parts: your project (data, models, work folder), what init detected (check it), and
-advanced settings (the validated PTP1B values). Typos are errors, not silent defaults.
-Every setting is listed in [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md).
+advanced settings (the validated PTP1B values; leave them alone unless you have a reason).
+Typos are errors, not silent defaults. Every setting is listed in
+[CONFIG_REFERENCE.md](CONFIG_REFERENCE.md).
 
 The work folder holds everything valdo writes. Your data files are never changed: valdo
 reads them through links in `<workdir>/inputs/`.
@@ -149,17 +199,19 @@ dataset (or a very similar one).
   as XChem/PanDDA input files do (`2FOFCWT`/`PHI2FOFCWT`, `FOFCWT`/`PHIFOFCWT`). Fastest.
   Give the models that produced those phases (`--models`), so that tagging and viewing use
   the same coordinates.
-- **`refine`**: valdo refines every dataset. `dimple` (CCP4, free for academic use) runs
-  rigid-body and restrained refinement; `phenix` uses `phenix.refine` with the packaged
-  `refine_drug.eff`, as upstream VALDO did (repaired: as shipped, PHENIX ignored the whole file;
-  see below). PHENIX must come from your own licence and installation. Refinement takes about
-  a minute per dataset per core with dimple and about 6-11 with phenix.refine (batch runs on
-  Wynton: median 6.4 minutes with PHENIX 2.2.1 and 11.3 with 1.21.2). Tell valdo where the
-  program is installed with one line in `valdo.yaml` (see
+- **`refine`** (`--phases refine --program dimple --ccp4 /path/to/ccp4-9`, or
+  `--program phenix --phenix /path/to/phenix-2.2-6143`): valdo refines every dataset. `dimple`
+  (CCP4, free for academic use) runs rigid-body and restrained refinement; `phenix` uses
+  `phenix.refine` with the packaged `refine_drug.eff`, as upstream VALDO did (repaired: as
+  shipped, PHENIX ignored the whole file; see below). PHENIX must come from your own licence
+  and installation. Refinement takes about a minute per dataset per core with dimple and about
+  6-11 with phenix.refine (batch runs on Wynton: median 6.4 minutes with PHENIX 2.2.1 and 11.3
+  with 1.21.2). Tell valdo where the program is installed with one line in `valdo.yaml` (see
   [Refinement programs](#refinement-programs)); twinned crystals can be refined as twinned
   (see [Twinned crystals](#twinned-crystals)).
-- **`existing`**: you refined every dataset already; point `--existing` at the refined MTZs
-  (`'/path/{name}/final.mtz'`). The column names are detected.
+- **`existing`**: you refined every dataset already:
+  `--phases existing --existing '/path/{name}/final.mtz'` (a pattern with `{name}`, a folder or
+  a glob). The column names are detected.
 
 When a dataset was reindexed, its own model and phases are converted into the new indexing
 automatically, both with the same operator: one that maps the space group onto itself (for
@@ -316,7 +368,49 @@ fractions above 0.27, where R-free without the twin law rose to 0.28). `valdo ru
 datasets in either case. Twin refinement avoids this, because the indexing is then taken from
 the program itself.
 
+## Batch jobs on a cluster
+
+On a cluster, `valdo run` belongs in a batch job, not on a login node (where `valdo check`
+warns: `login_node`). `valdo jobscript -o run_valdo.sh` writes the script, for SGE or SLURM
+(detected automatically); submit it with `qsub run_valdo.sh` or `sbatch run_valdo.sh`.
+`valdo jobscript` takes `--slots` (cores; default `compute.ncpu`), `--hours`, `--mem-gb` (per
+core; default 4), `--gpu` (see [GPUs](#gpus)) and `--env-setup 'shell line'` (by default the
+script activates the environment you run `valdo jobscript` in; lines without `activate` are
+added after that, lines with `activate` replace it; PHENIX and CCP4 need no line when
+`programs.phenix`/`programs.ccp4` is set in `valdo.yaml`). Without `--hours` it sets the time
+limit from the number of data files: about 3 times the time measured on Wynton plus 15 minutes
+(e.g. 1 h for 300 datasets on 16 cores with phases in the data, 2 h with dimple refinement); it
+prints the value and why. Look at the script before you submit it; [WYNTON.md](WYNTON.md) has
+a worked Wynton example.
+
+## Run times
+
+| step | ~300 datasets | ~1,700 datasets |
+|---|---|---|
+| `valdo init` | 2.5 s (measured, 300 PTP1B files) | 8 s (measured, 1,680 PTP1B files) |
+| `valdo check` | 2 s (measured) | a few seconds (headers only) |
+| `valdo run`, 16 CPU cores, no GPU, phases in the data | 5 min (measured: 298 PTP1B datasets) | 51 min (measured: 1,677 PTP1B datasets) |
+| `valdo run` with `phases.source: refine` (dimple) | add about 1 minute per dataset per core (measured: 39 PTP1B datasets refined in 3 min on 16 cores, 44-65 s each), e.g. ~20 min for 300 datasets on 16 cores | add ~2 h on 16 cores |
+| `valdo run` with `phases.source: refine` (phenix) | add about 6-11 minutes per dataset per core (measured: 39 PTP1B datasets refined in 20 min on 16 cores with PHENIX 2.2.1, 33 min with 1.21.2), e.g. ~2-3.5 h for 300 datasets on 16 cores | add ~11-20 h on 16 cores |
+
+How these numbers were obtained: the full PTP1B screen (1,680 files, 1,677 usable, 500
+training epochs) was run with `valdo run` as an SGE job on one 16-core Wynton CPU node on
+2026-10-24: 50 min 46 s in total. Per stage: standardize 22 s, reindex 1.7 min, scale 9.7 min,
+filter 5 s, preprocess 4.6 min, train 22 min, reconstruct 2 s, rescale 1.3 min,
+add_phases_and_blobs 5.3 min, tag_blobs 5.0 min, report 14 s. A random 300-file subset of the
+same screen (298 usable) took 5 min 9 s on 16 cores, following [QUICKSTART.md](QUICKSTART.md)
+step by step: standardize 9 s, reindex 16 s, scale 45 s, filter 1 s, preprocess 42 s, train
+2.0 min, reconstruct 0.4 s, rescale 10 s, add_phases_and_blobs 37 s, tag_blobs 22 s, report
+6 s. Most stages use all `compute.ncpu` cores; training uses them through PyTorch's threads.
+Your times depend on the node, resolution and file sizes.
+
 ## Reading the report
+
+The last stage of `valdo run` writes the report; `valdo report` rebuilds it (for example
+`valdo report --top 50` for maps of more hits). Besides the hits, `report.html` has a summary,
+the dataset funnel (how many datasets reached each stage, and how many were dropped where),
+quality-control plots (reindexing, scaling, VAE training) and, if you gave known bound models,
+how many of their ligands VALDO found and at which rank (descriptive only).
 
 `<workdir>/report/report.html` lists the kept blobs ranked by `score` (the blob's integrated
 difference density; upstream's ranking). For each top hit it gives the dataset (ID and
@@ -336,8 +430,10 @@ has every blob.
 blobs: moved side chains, alternative conformations, changed waters or ions, radiation
 damage, a different cryoprotectant, crystal contacts, and errors in the data. To judge a hit:
 
-1. Open it in Coot or PyMOL (`report/view_top_hits.py` or `.pml`). The difference map is
-   contoured at +3 sigma (green) and -3 sigma (red).
+1. Open it in Coot or PyMOL (in `<workdir>/report`: `coot --script view_top_hits.py` or
+   `pymol view_top_hits.pml`). Each hit opens with its model, the VALDO difference map
+   (contoured at +3 sigma, green, and -3 sigma, red) and, when available, a 2mFo-DFc map,
+   centred on the blob.
 2. Look at the shape. A ligand gives a compact, positive blob of a plausible size, next to
    the protein surface, not overlapping existing atoms. Paired positive and negative density
    next to a side chain usually means it moved.
@@ -374,8 +470,40 @@ Known limitations:
 - **Known-ligand validation is descriptive.** The section on known bound models reports how
   VALDO ranked those ligands; it is not a calibrated error rate.
 
+## What success looks like
+
+- `valdo run` ends with `Report: .../report/report.html` and exit code 0.
+- Most datasets went through (`valdo status`: `Datasets: N total, M ok`). Losing a few percent
+  at `filter` (poor correlation with the reference) is normal.
+- The top hits show compact positive (green) density away from the focal residue. On the
+  synthetic toy screen all 4 planted ligands were the top blob of their dataset. On the full
+  PTP1B screen (1,626 of 1,680 datasets analysed; 3 excluded as another crystal form, 51
+  dropped by the filter), 106 of the 110 datasets with a known bound model had a blob on the
+  ligand, and for 103 of them it was the top blob of the dataset (descriptive check,
+  `--bound-models`).
+- Then judge each hit by eye (see [Reading the report](#reading-the-report)).
+
+## Where the results are
+
+Everything is in the work folder (`workdir` in `valdo.yaml`, default `valdo_run` next to
+`valdo.yaml`):
+
+| path | what |
+|---|---|
+| `report/report.html` | start here |
+| `report/blobs.csv`, `report/top_hits.csv` | all kept blobs, ranked; the top hits with residues and map values |
+| `report/datasets.csv` | one row per dataset: original name, status, best blob |
+| `report/hits/`, `report/view_top_hits.py`, `report/view_top_hits.pml` | maps and models of the top hits; viewer scripts |
+| `datasets.csv` | what happened to every dataset: ID, original name, kept or dropped (where and why), flags |
+| `logs/<stage>.log`, `logs/run.log` | full output of each stage; the console output of every `valdo run` |
+| `configs/<stage>.yaml` | the exact upstream settings used (rerun any stage with `valdo.pipeline <stage> configs/<stage>.yaml --force`) |
+| `01_standardize/` ... `11_tag/` | intermediate files of each stage |
+
 ## Resuming and rerunning
 
+- `valdo status` (any time, also while a job is running) shows what has run, what is out of
+  date and where datasets were dropped. A stage marked `out of date` would run again on the
+  next `valdo run` (you changed a setting or an input).
 - `valdo run` skips finished stages. A stage reruns only if it failed, was interrupted, or
   something it depends on changed (its settings, its inputs, or an earlier stage's results).
   Before a stage reruns, its output folder is emptied, so old and new files never mix.
